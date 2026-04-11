@@ -35,6 +35,23 @@ cargo run -- gone unpushed --dry-run
 cargo run -- gone --batch
 ```
 
+## Install from source
+
+Clone the repo, then install the binary with Cargo:
+
+```bash
+cargo install --path .
+```
+
+That places `git-broom` in Cargo's bin directory, typically `~/.cargo/bin`.
+
+If you prefer to build it without installing globally:
+
+```bash
+cargo build --release
+./target/release/git-broom
+```
+
 ## Running the tests
 
 Core local checks:
