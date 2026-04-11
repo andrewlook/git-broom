@@ -11,7 +11,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use git_broom::app::{App, DeleteResult, delete_branches};
+use git_broom::app::{App, Branch, DeleteResult, delete_branches};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -119,20 +119,8 @@ fn run_dry_run(repo: &Path) -> Result<()> {
         return Ok(());
     }
 
-    for branch in app.branches {
-        let status = if branch.is_protected() {
-            "keep"
-        } else {
-            "candidate"
-        };
-        let upstream = branch.upstream.as_deref().unwrap_or("-");
-        println!(
-            "{status}\t{}\t{}\t{}\t{}",
-            branch.display_name(),
-            upstream,
-            branch.relative_date,
-            branch.subject
-        );
+    for line in format_dry_run_lines(&app.branches) {
+        println!("{line}");
     }
 
     Ok(())
@@ -198,6 +186,74 @@ fn print_delete_results(results: &[DeleteResult]) {
     println!("Deleted {deleted} branches. {failed} failed.");
 }
 
+fn format_dry_run_lines(branches: &[Branch]) -> Vec<String> {
+    let deletable_count = branches
+        .iter()
+        .filter(|branch| branch.is_deletable())
+        .count();
+    let protected_count = branches.len() - deletable_count;
+
+    let mut lines = vec![
+        format!(
+            "Found {} gone branches: {} deletable, {} protected.",
+            branches.len(),
+            deletable_count,
+            protected_count
+        ),
+        String::new(),
+        format!(
+            "{:<6}  {:<28}  {:<12}  {:<14}  {:<28}  {}",
+            "ACTION", "BRANCH", "PROTECTION", "LAST COMMIT", "UPSTREAM", "MESSAGE"
+        ),
+    ];
+
+    lines.extend(branches.iter().map(format_dry_run_row));
+    lines
+}
+
+fn format_dry_run_row(branch: &Branch) -> String {
+    let action = if branch.is_protected() {
+        "keep"
+    } else {
+        "delete"
+    };
+    let protection = if branch.protections.is_empty() {
+        "-".to_string()
+    } else {
+        branch
+            .protections
+            .iter()
+            .map(|protection| protection.label())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let upstream = branch.upstream.as_deref().unwrap_or("-");
+
+    format!(
+        "{:<6}  {:<28}  {:<12}  {:<14}  {:<28}  {}",
+        action,
+        fit_for_column(&branch.name, 28),
+        fit_for_column(&protection, 12),
+        fit_for_column(&branch.relative_date, 14),
+        fit_for_column(upstream, 28),
+        fit_for_column(&branch.subject, 48),
+    )
+}
+
+fn fit_for_column(value: &str, width: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= width {
+        return value.to_string();
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let truncated = value.chars().take(width - 3).collect::<String>();
+    format!("{truncated}...")
+}
+
 type PanicHook = dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static;
 
 struct TerminalGuard {
@@ -243,4 +299,51 @@ impl Drop for TerminalGuard {
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
+}
+
+#[cfg(test)]
+mod tests {
+    use git_broom::app::{Branch, Decision, Protection};
+
+    use super::{fit_for_column, format_dry_run_lines};
+
+    fn sample_branch(name: &str, protections: Vec<Protection>) -> Branch {
+        Branch {
+            name: name.to_string(),
+            upstream: Some(format!("origin/{name}")),
+            upstream_track: "[gone]".to_string(),
+            relative_date: "2 days ago".to_string(),
+            subject: "subject line".to_string(),
+            decision: if protections.is_empty() {
+                Decision::Undecided
+            } else {
+                Decision::Keep
+            },
+            protections,
+        }
+    }
+
+    #[test]
+    fn fit_for_column_truncates_long_values() {
+        assert_eq!(
+            fit_for_column("feature/some-very-long-branch-name", 12),
+            "feature/s..."
+        );
+    }
+
+    #[test]
+    fn format_dry_run_lines_includes_summary_and_protection_column() {
+        let rows = vec![
+            sample_branch("feature/delete-me", Vec::new()),
+            sample_branch("main", vec![Protection::Main]),
+        ];
+
+        let lines = format_dry_run_lines(&rows);
+
+        assert_eq!(lines[0], "Found 2 gone branches: 1 deletable, 1 protected.");
+        assert!(lines[2].contains("PROTECTION"));
+        assert!(lines[3].contains("delete"));
+        assert!(lines[4].contains("keep"));
+        assert!(lines[4].contains("main"));
+    }
 }
