@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+staged_rust_files="$(
+  git diff --cached --name-only --diff-filter=ACMR -- '*.rs'
+)"
+
+if [[ -n "$staged_rust_files" ]]; then
+  echo "Running rustfmt on staged Rust files..."
+  while IFS= read -r file; do
+    [[ -f "$file" ]] || continue
+    rustfmt --edition 2024 "$file"
+    git add "$file"
+  done <<< "$staged_rust_files"
+fi
+
+echo "Running cargo clippy..."
+cargo clippy --all-targets --all-features -- -D warnings
