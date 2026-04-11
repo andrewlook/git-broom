@@ -6,6 +6,52 @@ use anyhow::{Context, Result, anyhow, bail};
 
 const FIELD_SEPARATOR: char = '\u{1f}';
 
+pub const IMPLEMENTED_MODES: [CleanupMode; 2] = [CleanupMode::Gone, CleanupMode::Unpushed];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CleanupMode {
+    Gone,
+    Unpushed,
+}
+
+impl CleanupMode {
+    pub fn from_arg(value: &str) -> Option<Self> {
+        match value {
+            "gone" => Some(Self::Gone),
+            "unpushed" => Some(Self::Unpushed),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gone => "gone",
+            Self::Unpushed => "unpushed",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Gone => "upstream branch no longer exists",
+            Self::Unpushed => "no upstream tracking branch is configured",
+        }
+    }
+
+    pub fn no_matches_message(self) -> &'static str {
+        match self {
+            Self::Gone => "No gone branches found.",
+            Self::Unpushed => "No unpushed branches found.",
+        }
+    }
+
+    fn matches(self, branch: &Branch) -> bool {
+        match self {
+            Self::Gone => branch.upstream_track.contains("[gone]"),
+            Self::Unpushed => branch.upstream.is_none(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Undecided,
@@ -69,18 +115,29 @@ impl Branch {
 }
 
 #[derive(Debug, Clone)]
+pub struct Tranche {
+    pub mode: CleanupMode,
+    pub branches: Vec<Branch>,
+}
+
+#[derive(Debug, Clone)]
 pub struct App {
+    pub mode: CleanupMode,
+    pub step_index: usize,
+    pub step_count: usize,
     pub branches: Vec<Branch>,
     pub selected: usize,
 }
 
 impl App {
-    pub fn load(repo: &Path) -> Result<Self> {
-        let branches = scan_gone_branches(repo)?;
-        Ok(Self {
-            branches,
+    pub fn from_tranche(tranche: Tranche, step_index: usize, step_count: usize) -> Self {
+        Self {
+            mode: tranche.mode,
+            step_index,
+            step_count,
+            branches: tranche.branches,
             selected: 0,
-        })
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -165,34 +222,26 @@ pub struct DeleteResult {
     pub message: String,
 }
 
-pub fn scan_gone_branches(repo: &Path) -> Result<Vec<Branch>> {
+pub fn scan_selected_modes(repo: &Path, modes: &[CleanupMode]) -> Result<Vec<Tranche>> {
     ensure_work_tree(repo)?;
 
     let current_branch = current_branch(repo)?;
     let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
-    let lines = git_output(
-        repo,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)\u{1f}%(upstream:short)\u{1f}%(upstream:track)\u{1f}%(committerdate:relative)\u{1f}%(subject)",
-            "refs/heads/",
-        ],
-    )?;
+    let all_branches = load_branch_inventory(repo, current_branch.as_deref(), &worktree_branches)?;
 
-    let mut branches = Vec::new();
-    for line in lines.lines().filter(|line| !line.trim().is_empty()) {
-        let Some(branch) = parse_branch_line(line, current_branch.as_deref(), &worktree_branches)
-        else {
-            continue;
-        };
+    Ok(modes
+        .iter()
+        .copied()
+        .map(|mode| {
+            let branches = all_branches
+                .iter()
+                .filter(|branch| mode.matches(branch))
+                .cloned()
+                .collect::<Vec<_>>();
 
-        if branch.upstream_track.contains("[gone]") {
-            branches.push(branch);
-        }
-    }
-
-    branches.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(branches)
+            Tranche { mode, branches }
+        })
+        .collect())
 }
 
 pub fn delete_branches(repo: &Path, branches: &[String]) -> Vec<DeleteResult> {
@@ -229,6 +278,33 @@ pub fn delete_branches(repo: &Path, branches: &[String]) -> Vec<DeleteResult> {
             }
         })
         .collect()
+}
+
+fn load_branch_inventory(
+    repo: &Path,
+    current_branch: Option<&str>,
+    worktree_branches: &HashSet<String>,
+) -> Result<Vec<Branch>> {
+    let lines = git_output(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\u{1f}%(upstream:short)\u{1f}%(upstream:track)\u{1f}%(committerdate:relative)\u{1f}%(subject)",
+            "refs/heads/",
+        ],
+    )?;
+
+    let mut branches = Vec::new();
+    for line in lines.lines().filter(|line| !line.trim().is_empty()) {
+        let Some(branch) = parse_branch_line(line, current_branch, worktree_branches) else {
+            continue;
+        };
+
+        branches.push(branch);
+    }
+
+    branches.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(branches)
 }
 
 fn parse_branch_line(
@@ -363,7 +439,7 @@ fn git_output_raw(repo: &Path, args: &[&str]) -> Result<Output> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{Decision, Protection, parse_branch_line};
+    use super::{CleanupMode, Decision, Protection, parse_branch_line};
 
     #[test]
     fn parse_branch_line_marks_current_branch_as_protected() {
@@ -404,5 +480,31 @@ mod tests {
 
         assert_eq!(branch.protections, vec![Protection::Main]);
         assert_eq!(branch.decision, Decision::Keep);
+    }
+
+    #[test]
+    fn cleanup_mode_matches_gone_branches() {
+        let branch = parse_branch_line(
+            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+
+        assert!(CleanupMode::Gone.matches(&branch));
+        assert!(!CleanupMode::Unpushed.matches(&branch));
+    }
+
+    #[test]
+    fn cleanup_mode_matches_unpushed_branches() {
+        let branch = parse_branch_line(
+            "feature/foo\u{1f}\u{1f}\u{1f}2 days ago\u{1f}test subject",
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+
+        assert!(CleanupMode::Unpushed.matches(&branch));
+        assert!(!CleanupMode::Gone.matches(&branch));
     }
 }

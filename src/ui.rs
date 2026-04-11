@@ -9,8 +9,27 @@ use crate::app::{App, Branch, Decision};
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
+
+    let info = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                format!("Tranche {} of {}: ", app.step_index, app.step_count),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                app.mode.name(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(app.mode.description()),
+    ]);
+    frame.render_widget(info, chunks[0]);
 
     let items = app
         .branches
@@ -23,9 +42,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .block(
             Block::default()
                 .title(format!(
-                    " git-broom: {} of {} gone branches ",
+                    " git-broom: {} selected of {} {} branches ",
                     app.delete_count(),
-                    app.branches.len()
+                    app.branches.len(),
+                    app.mode.name(),
                 ))
                 .borders(Borders::ALL),
         )
@@ -37,11 +57,11 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         state.select(Some(app.selected));
     }
 
-    frame.render_stateful_widget(list, chunks[0], &mut state);
+    frame.render_stateful_widget(list, chunks[1], &mut state);
 
     let footer =
-        Paragraph::new("j/k: move  d: delete  s: keep  a: all  u: clear  Enter: go  q: quit");
-    frame.render_widget(footer, chunks[1]);
+        Paragraph::new("j/k: move  d: delete  s: keep  a: all  u: clear  Enter: review  q: quit");
+    frame.render_widget(footer, chunks[2]);
 }
 
 fn render_branch(branch: &Branch) -> Line<'static> {

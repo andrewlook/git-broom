@@ -2,11 +2,13 @@
 
 `git-broom` is a small Rust CLI for cleaning up stale local git branches after squash-merge workflows leave tracking branches behind.
 
-Current v1 scope is intentionally narrow:
+Current behavior focuses on two cleanup tranches:
 
-- interactive cleanup for branches whose upstream tracking ref is `[gone]`
-- `--batch` for scriptable branch-name output
-- `--dry-run` for a readable preview without deleting anything
+- `gone`: branches whose upstream tracking ref is `[gone]`
+- `unpushed`: local branches with no upstream configured
+- interactive mode walks the selected tranches one by one
+- `--batch` prints deletable branch names for the selected tranches
+- `--dry-run` prints grouped previews without deleting anything
 
 ## Requirements
 
@@ -22,13 +24,15 @@ If you use `mise`, that is still fine; `mise` can manage the Rust toolchain, but
 cargo run
 ```
 
-That starts the interactive TUI.
+That starts the interactive workflow for all implemented cleanup tranches in order.
 
 Other modes:
 
 ```bash
-cargo run -- --batch
-cargo run -- --dry-run
+cargo run -- gone
+cargo run -- unpushed
+cargo run -- gone unpushed --dry-run
+cargo run -- gone --batch
 ```
 
 ## Running the tests

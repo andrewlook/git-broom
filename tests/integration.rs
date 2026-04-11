@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use git_broom::app::{Protection, scan_gone_branches};
+use git_broom::app::{CleanupMode, Protection, scan_selected_modes};
 use tempfile::TempDir;
 
 #[test]
@@ -10,11 +10,22 @@ fn scan_returns_gone_branch_as_deletable() {
     let repo = TestRepo::new();
     repo.create_gone_branch("feature/gone");
 
-    let branches = scan_gone_branches(repo.local_path()).expect("scan succeeds");
-    let branch = branches
-        .iter()
-        .find(|branch| branch.name == "feature/gone")
-        .expect("gone branch present");
+    let tranches =
+        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
+    let branch = find_branch(&tranches, CleanupMode::Gone, "feature/gone");
+
+    assert!(branch.protections.is_empty());
+    assert!(branch.is_deletable());
+}
+
+#[test]
+fn scan_returns_unpushed_branch_as_deletable() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/local-only");
+
+    let tranches =
+        scan_selected_modes(repo.local_path(), &[CleanupMode::Unpushed]).expect("scan succeeds");
+    let branch = find_branch(&tranches, CleanupMode::Unpushed, "feature/local-only");
 
     assert!(branch.protections.is_empty());
     assert!(branch.is_deletable());
@@ -26,11 +37,9 @@ fn scan_marks_current_branch_as_protected() {
     repo.create_gone_branch("feature/current");
     repo.git_local(["checkout", "feature/current"]);
 
-    let branches = scan_gone_branches(repo.local_path()).expect("scan succeeds");
-    let branch = branches
-        .iter()
-        .find(|branch| branch.name == "feature/current")
-        .expect("current gone branch present");
+    let tranches =
+        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
+    let branch = find_branch(&tranches, CleanupMode::Gone, "feature/current");
 
     assert_eq!(branch.protections, vec![Protection::Current]);
     assert!(!branch.is_deletable());
@@ -48,11 +57,9 @@ fn scan_marks_other_worktree_branch_as_protected() {
         "feature/worktree",
     ]);
 
-    let branches = scan_gone_branches(repo.local_path()).expect("scan succeeds");
-    let branch = branches
-        .iter()
-        .find(|branch| branch.name == "feature/worktree")
-        .expect("worktree branch present");
+    let tranches =
+        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
+    let branch = find_branch(&tranches, CleanupMode::Gone, "feature/worktree");
 
     assert_eq!(branch.protections, vec![Protection::Worktree]);
     assert!(!branch.is_deletable());
@@ -68,11 +75,52 @@ fn scan_works_from_detached_head() {
         .to_string();
     repo.git_local(["checkout", "--detach", &main_head]);
 
-    let branches = scan_gone_branches(repo.local_path()).expect("scan succeeds");
+    let tranches =
+        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
     assert!(
-        branches
+        tranches[0]
+            .branches
             .iter()
             .any(|branch| branch.name == "feature/detached")
+    );
+}
+
+#[test]
+fn scan_keeps_gone_and_unpushed_tranches_separate() {
+    let repo = TestRepo::new();
+    repo.create_gone_branch("feature/gone");
+    repo.create_unpushed_branch("feature/local-only");
+
+    let tranches = scan_selected_modes(
+        repo.local_path(),
+        &[CleanupMode::Gone, CleanupMode::Unpushed],
+    )
+    .expect("scan succeeds");
+
+    assert!(
+        find_tranche(&tranches, CleanupMode::Gone)
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature/gone")
+    );
+    assert!(
+        !find_tranche(&tranches, CleanupMode::Gone)
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature/local-only")
+    );
+
+    assert!(
+        find_tranche(&tranches, CleanupMode::Unpushed)
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature/local-only")
+    );
+    assert!(
+        !find_tranche(&tranches, CleanupMode::Unpushed)
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature/gone")
     );
 }
 
@@ -116,6 +164,19 @@ impl TestRepo {
     }
 
     fn create_gone_branch(&self, branch: &str) {
+        self.create_local_branch(branch);
+        self.git_local(["push", "-u", "origin", branch]);
+        self.git_local(["checkout", "main"]);
+        self.git_local(["push", "origin", "--delete", branch]);
+        self.git_local(["fetch", "--prune", "origin"]);
+    }
+
+    fn create_unpushed_branch(&self, branch: &str) {
+        self.create_local_branch(branch);
+        self.git_local(["checkout", "main"]);
+    }
+
+    fn create_local_branch(&self, branch: &str) {
         let file_name = branch.replace('/', "_");
         self.git_local(["checkout", "-b", branch]);
         fs::write(
@@ -125,10 +186,6 @@ impl TestRepo {
         .expect("branch file written");
         self.git_local(["add", "."]);
         self.git_local(["commit", "-m", &format!("Add {branch}")]);
-        self.git_local(["push", "-u", "origin", branch]);
-        self.git_local(["checkout", "main"]);
-        self.git_local(["push", "origin", "--delete", branch]);
-        self.git_local(["fetch", "--prune", "origin"]);
     }
 
     fn git_local<const N: usize>(&self, args: [&str; N]) {
@@ -146,6 +203,28 @@ impl TestRepo {
     fn temp_path(&self, name: &str) -> PathBuf {
         self._root.path().join(name)
     }
+}
+
+fn find_tranche(
+    tranches: &[git_broom::app::Tranche],
+    mode: CleanupMode,
+) -> &git_broom::app::Tranche {
+    tranches
+        .iter()
+        .find(|tranche| tranche.mode == mode)
+        .expect("tranche present")
+}
+
+fn find_branch<'a>(
+    tranches: &'a [git_broom::app::Tranche],
+    mode: CleanupMode,
+    branch_name: &str,
+) -> &'a git_broom::app::Branch {
+    find_tranche(tranches, mode)
+        .branches
+        .iter()
+        .find(|branch| branch.name == branch_name)
+        .expect("branch present")
 }
 
 fn git<const N: usize>(repo: &Path, args: [&str; N]) {

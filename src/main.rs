@@ -11,7 +11,10 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use git_broom::app::{App, Branch, DeleteResult, delete_branches};
+use git_broom::app::{
+    App, Branch, CleanupMode, DeleteResult, IMPLEMENTED_MODES, Tranche, delete_branches,
+    scan_selected_modes,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -23,85 +26,142 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mode = parse_mode(env::args().skip(1))?;
+    let cli = parse_cli(env::args().skip(1))?;
     let repo = env::current_dir()?;
+    let tranches = scan_selected_modes(&repo, &cli.modes)?;
 
-    match mode {
-        Mode::Interactive => run_interactive(&repo),
-        Mode::Batch => run_batch(&repo),
-        Mode::DryRun => run_dry_run(&repo),
+    match cli.output {
+        OutputMode::Interactive => run_interactive(&repo, tranches),
+        OutputMode::Batch => run_batch(&tranches),
+        OutputMode::DryRun => run_dry_run(&tranches),
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
+enum OutputMode {
     Interactive,
     Batch,
     DryRun,
 }
 
-fn parse_mode(args: impl Iterator<Item = String>) -> Result<Mode> {
-    let args = args.collect::<Vec<_>>();
-    match args.as_slice() {
-        [] => Ok(Mode::Interactive),
-        [flag] if flag == "--batch" => Ok(Mode::Batch),
-        [flag] if flag == "--dry-run" => Ok(Mode::DryRun),
-        _ => bail!("usage: git-broom [--batch | --dry-run]"),
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliOptions {
+    modes: Vec<CleanupMode>,
+    output: OutputMode,
 }
 
-fn run_interactive(repo: &Path) -> Result<()> {
-    println!("Scanning branches...");
-    let mut app = App::load(repo)?;
+fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
+    let mut modes = Vec::new();
+    let mut output = OutputMode::Interactive;
 
-    if app.is_empty() {
-        println!("No gone branches found.");
+    for arg in args {
+        match arg.as_str() {
+            "--batch" => {
+                if output == OutputMode::DryRun {
+                    bail!("--batch and --dry-run cannot be used together");
+                }
+                output = OutputMode::Batch;
+            }
+            "--dry-run" => {
+                if output == OutputMode::Batch {
+                    bail!("--batch and --dry-run cannot be used together");
+                }
+                output = OutputMode::DryRun;
+            }
+            "-h" | "--help" => {
+                print_usage();
+                process::exit(0);
+            }
+            value => {
+                let Some(mode) = CleanupMode::from_arg(value) else {
+                    bail!("unknown cleanup mode `{value}`\n\n{}", usage_text());
+                };
+
+                if !modes.contains(&mode) {
+                    modes.push(mode);
+                }
+            }
+        }
+    }
+
+    if modes.is_empty() {
+        modes = IMPLEMENTED_MODES.to_vec();
+    }
+
+    Ok(CliOptions { modes, output })
+}
+
+fn run_interactive(repo: &Path, tranches: Vec<Tranche>) -> Result<()> {
+    if tranches.iter().all(|tranche| tranche.branches.is_empty()) {
+        println!("No branches found for selected cleanup modes.");
         return Ok(());
     }
 
-    match run_tui(&mut app)? {
-        ExitAction::Quit => {
-            println!("No branches deleted.");
-            Ok(())
+    let tranche_count = tranches.len();
+    let mut total_deleted = 0;
+    let mut total_failed = 0;
+
+    for (index, tranche) in tranches.into_iter().enumerate() {
+        if tranche.branches.is_empty() {
+            println!("{}", tranche.mode.no_matches_message());
+            continue;
         }
-        ExitAction::Confirm => {
-            let branches_to_delete = app
-                .delete_candidates()
-                .into_iter()
-                .map(|branch| branch.name.clone())
-                .collect::<Vec<_>>();
 
-            if branches_to_delete.is_empty() {
-                println!("No branches selected for deletion.");
-                return Ok(());
-            }
-
-            println!("About to delete {} branches:", branches_to_delete.len());
-            for branch in &branches_to_delete {
-                println!("  {branch}");
-            }
-
-            if !prompt_for_confirmation()? {
+        let mut app = App::from_tranche(tranche, index + 1, tranche_count);
+        match run_tui(&mut app)? {
+            ExitAction::Quit => {
                 println!("Aborted.");
                 return Ok(());
             }
+            ExitAction::Confirm => {
+                let branches_to_delete = app
+                    .delete_candidates()
+                    .into_iter()
+                    .map(|branch| branch.name.clone())
+                    .collect::<Vec<_>>();
 
-            print_delete_results(&delete_branches(repo, &branches_to_delete));
-            Ok(())
+                if branches_to_delete.is_empty() {
+                    println!("No {} branches selected for deletion.", app.mode.name());
+                    continue;
+                }
+
+                println!(
+                    "About to delete {} {} branches ({}):",
+                    branches_to_delete.len(),
+                    app.mode.name(),
+                    app.mode.description()
+                );
+                for branch in &branches_to_delete {
+                    println!("  {branch}");
+                }
+
+                if !prompt_for_confirmation()? {
+                    println!("Skipped {}.", app.mode.name());
+                    continue;
+                }
+
+                let (deleted, failed) =
+                    print_delete_results(app.mode, &delete_branches(repo, &branches_to_delete));
+                total_deleted += deleted;
+                total_failed += failed;
+            }
         }
     }
+
+    println!("Workflow complete. Deleted {total_deleted} branches. {total_failed} failed.");
+    Ok(())
 }
 
-fn run_batch(repo: &Path) -> Result<()> {
-    let app = App::load(repo)?;
-    let branches = app
-        .deletable_branches()
-        .into_iter()
+fn run_batch(tranches: &[Tranche]) -> Result<()> {
+    let branches = tranches
+        .iter()
+        .flat_map(|tranche| tranche.branches.iter())
+        .filter(|branch| branch.is_deletable())
         .map(|branch| branch.name.as_str())
         .collect::<Vec<_>>();
 
     if branches.is_empty() {
-        eprintln!("No deletable gone branches found.");
+        eprintln!("No deletable branches found for selected cleanup modes.");
         return Ok(());
     }
 
@@ -112,14 +172,8 @@ fn run_batch(repo: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_dry_run(repo: &Path) -> Result<()> {
-    let app = App::load(repo)?;
-    if app.is_empty() {
-        println!("No gone branches found.");
-        return Ok(());
-    }
-
-    for line in format_dry_run_lines(&app.branches) {
+fn run_dry_run(tranches: &[Tranche]) -> Result<()> {
+    for line in format_dry_run_lines(tranches) {
         println!("{line}");
     }
 
@@ -169,7 +223,7 @@ fn prompt_for_confirmation() -> Result<bool> {
     Ok(matches!(input.trim(), "y" | "Y"))
 }
 
-fn print_delete_results(results: &[DeleteResult]) {
+fn print_delete_results(mode: CleanupMode, results: &[DeleteResult]) -> (usize, usize) {
     let mut deleted = 0;
     let mut failed = 0;
 
@@ -183,60 +237,54 @@ fn print_delete_results(results: &[DeleteResult]) {
         }
     }
 
-    println!("Deleted {deleted} branches. {failed} failed.");
+    println!(
+        "{}: deleted {deleted} branches. {failed} failed.",
+        mode.name()
+    );
+
+    (deleted, failed)
 }
 
-fn format_dry_run_lines(branches: &[Branch]) -> Vec<String> {
-    let deletable_count = branches
-        .iter()
-        .filter(|branch| branch.is_deletable())
-        .count();
-    let protected_count = branches.len() - deletable_count;
+fn format_dry_run_lines(tranches: &[Tranche]) -> Vec<String> {
+    let mut lines = Vec::new();
 
-    let mut lines = vec![
-        format!(
-            "Found {} gone branches: {} deletable, {} protected.",
-            branches.len(),
-            deletable_count,
-            protected_count
-        ),
-        String::new(),
-        format!(
-            "{:<6}  {:<28}  {:<12}  {:<14}  {:<28}  {}",
-            "ACTION", "BRANCH", "PROTECTION", "LAST COMMIT", "UPSTREAM", "MESSAGE"
-        ),
-    ];
+    for tranche in tranches {
+        let deletable = tranche
+            .branches
+            .iter()
+            .filter(|branch| branch.is_deletable())
+            .collect::<Vec<_>>();
 
-    lines.extend(branches.iter().map(format_dry_run_row));
+        if deletable.is_empty() {
+            continue;
+        }
+
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+
+        lines.push(format!(
+            "{} ({})",
+            tranche.mode.name(),
+            tranche.mode.description()
+        ));
+        lines.extend(deletable.into_iter().map(format_dry_run_branch));
+    }
+
+    if lines.is_empty() {
+        return vec![String::from(
+            "No deletable branches found for selected cleanup modes.",
+        )];
+    }
+
     lines
 }
 
-fn format_dry_run_row(branch: &Branch) -> String {
-    let action = if branch.is_protected() {
-        "keep"
-    } else {
-        "delete"
-    };
-    let protection = if branch.protections.is_empty() {
-        "-".to_string()
-    } else {
-        branch
-            .protections
-            .iter()
-            .map(|protection| protection.label())
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let upstream = branch.upstream.as_deref().unwrap_or("-");
-
+fn format_dry_run_branch(branch: &Branch) -> String {
     format!(
-        "{:<6}  {:<28}  {:<12}  {:<14}  {:<28}  {}",
-        action,
-        fit_for_column(&branch.name, 28),
-        fit_for_column(&protection, 12),
-        fit_for_column(&branch.relative_date, 14),
-        fit_for_column(upstream, 28),
-        fit_for_column(&branch.subject, 48),
+        "  {:<40} ({})",
+        fit_for_column(&branch.name, 40),
+        branch.relative_date
     )
 }
 
@@ -252,6 +300,14 @@ fn fit_for_column(value: &str, width: usize) -> String {
 
     let truncated = value.chars().take(width - 3).collect::<String>();
     format!("{truncated}...")
+}
+
+fn usage_text() -> &'static str {
+    "usage: git-broom [gone] [unpushed] [--batch | --dry-run]"
+}
+
+fn print_usage() {
+    println!("{}", usage_text());
 }
 
 type PanicHook = dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static;
@@ -303,24 +359,41 @@ fn restore_terminal() {
 
 #[cfg(test)]
 mod tests {
-    use git_broom::app::{Branch, Decision, Protection};
+    use git_broom::app::{Branch, CleanupMode, Decision, Tranche};
 
-    use super::{fit_for_column, format_dry_run_lines};
+    use super::{OutputMode, fit_for_column, format_dry_run_lines, parse_cli};
 
-    fn sample_branch(name: &str, protections: Vec<Protection>) -> Branch {
+    fn sample_branch(name: &str) -> Branch {
         Branch {
             name: name.to_string(),
             upstream: Some(format!("origin/{name}")),
             upstream_track: "[gone]".to_string(),
             relative_date: "2 days ago".to_string(),
             subject: "subject line".to_string(),
-            decision: if protections.is_empty() {
-                Decision::Undecided
-            } else {
-                Decision::Keep
-            },
-            protections,
+            decision: Decision::Undecided,
+            protections: Vec::new(),
         }
+    }
+
+    #[test]
+    fn parse_cli_defaults_to_all_modes() {
+        let cli = parse_cli(std::iter::empty()).expect("cli parses");
+
+        assert_eq!(cli.modes, vec![CleanupMode::Gone, CleanupMode::Unpushed]);
+        assert_eq!(cli.output, OutputMode::Interactive);
+    }
+
+    #[test]
+    fn parse_cli_accepts_multiple_modes_with_dry_run() {
+        let cli = parse_cli(
+            ["gone", "unpushed", "--dry-run"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("cli parses");
+
+        assert_eq!(cli.modes, vec![CleanupMode::Gone, CleanupMode::Unpushed]);
+        assert_eq!(cli.output, OutputMode::DryRun);
     }
 
     #[test]
@@ -332,18 +405,24 @@ mod tests {
     }
 
     #[test]
-    fn format_dry_run_lines_includes_summary_and_protection_column() {
-        let rows = vec![
-            sample_branch("feature/delete-me", Vec::new()),
-            sample_branch("main", vec![Protection::Main]),
-        ];
+    fn format_dry_run_lines_groups_branches_by_mode() {
+        let lines = format_dry_run_lines(&[
+            Tranche {
+                mode: CleanupMode::Gone,
+                branches: vec![sample_branch("feature/delete-me")],
+            },
+            Tranche {
+                mode: CleanupMode::Unpushed,
+                branches: vec![sample_branch("feature/local-only")],
+            },
+        ]);
 
-        let lines = format_dry_run_lines(&rows);
-
-        assert_eq!(lines[0], "Found 2 gone branches: 1 deletable, 1 protected.");
-        assert!(lines[2].contains("PROTECTION"));
-        assert!(lines[3].contains("delete"));
-        assert!(lines[4].contains("keep"));
-        assert!(lines[4].contains("main"));
+        assert_eq!(lines[0], "gone (upstream branch no longer exists)");
+        assert!(lines[1].contains("feature/delete-me"));
+        assert_eq!(
+            lines[3],
+            "unpushed (no upstream tracking branch is configured)"
+        );
+        assert!(lines[4].contains("feature/local-only"));
     }
 }
