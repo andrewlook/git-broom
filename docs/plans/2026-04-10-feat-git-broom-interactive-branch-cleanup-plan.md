@@ -4,50 +4,40 @@ type: feat
 date: 2026-04-10
 ---
 
-# feat: Interactive git branch cleanup TUI
+# feat: Interactive git branch cleanup TUI (v1)
 
 ## Overview
 
 `git-broom` is a Rust TUI tool that helps developers clean up stale local git branches. It solves the problem where squash-merge workflows break `git branch --merged`, leaving dozens of zombie branches that are tedious to identify and clean up manually.
 
-The tool works in two phases:
-1. **Scan** — interactively review matching branches, mark each as keep or delete, output a TSV plan file
-2. **Execute** — read the plan, confirm each deletion, then carry them out
+v1 focuses on the most common case: branches whose upstream tracking branch has been deleted (i.e., already merged via squash-merge).
 
 ## Problem Statement
 
 In squash-merge PR workflows:
 - `git branch --merged` doesn't detect squash-merged branches
 - Upstream branches auto-delete after merge, but local tracking branches remain
-- Prototype branches accumulate with no tracking branch
-- Stale branches from reorganized PR stacks linger with closed/orphaned PRs
-
-Developers must manually run `git branch -vv`, eyeball the output, and delete branches one by one. This is error-prone and tedious with 20+ branches.
+- Developers must manually run `git branch -vv`, eyeball the output, and delete branches one by one
 
 ## Proposed Solution
 
-A two-command Rust TUI built with **ratatui** + **crossterm**:
+A single-command Rust TUI built with **ratatui** + **crossterm**:
 
 ```
-git-broom scan <mode>    # interactive TUI → produces TSV plan
-git-broom execute [file] # reads TSV → confirms + deletes
+git-broom           # interactive TUI → mark branches → confirm → delete
+git-broom --batch   # print deletable branch names to stdout (scriptable)
+git-broom --dry-run # show what would be deleted without acting
 ```
 
-### Three scan modes
-
-| Mode | Filter logic | Delete scope | External deps |
-|---|---|---|---|
-| `gone` | Upstream tracking branch deleted | local only | git |
-| `unpushed` | No remote tracking branch configured | local only | git |
-| `closed` | Remote exists, but PR is closed or never opened | local + remote | git + `gh` |
+v1 handles "gone" branches only — branches whose upstream tracking branch has been deleted. Future modes (`unpushed`, `closed`) are planned separately.
 
 ### Data flow
 
 ```
-scan gone → TUI → .git/broom-plan.tsv → echo "run: git-broom execute"
-                                              ↓
-                                    execute → confirm each → git branch -D / git push origin :branch
+git-broom → scan (with spinner) → TUI (mark keep/delete) → confirm → delete → summary
 ```
+
+No intermediate files. Scan, decide, and execute in a single session.
 
 ## Technical Approach
 
@@ -55,13 +45,9 @@ scan gone → TUI → .git/broom-plan.tsv → echo "run: git-broom execute"
 
 ```
 src/
-  main.rs       — CLI parsing (clap), entry point
-  app.rs        — App state, update logic, branch data model
+  main.rs       — CLI args, terminal setup/teardown, entry point
+  app.rs        — App state, branch scanning, update logic, deletion
   ui.rs         — ratatui render functions (takes &App immutably)
-  tui.rs        — Terminal setup/teardown wrapper with Drop cleanup
-  scanner.rs    — Branch discovery: shells out to git + gh
-  executor.rs   — Reads TSV, confirms, runs deletions
-  plan.rs       — TSV read/write logic
 ```
 
 ### Key technical decisions
@@ -72,16 +58,16 @@ src/
 git for-each-ref --format='%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(committerdate:iso8601)\t%(subject)' refs/heads/
 ```
 
-**Shell out to `gh` CLI with `--json`.** Fetch all PRs once with `gh pr list --state all --json number,title,state,headRefName,url`, then match to branches in Rust. Avoids N+1 API calls.
+Filter for branches where `%(upstream:track)` contains `[gone]`.
 
-**Sync event loop.** No async runtime needed. Load branch data before entering the TUI, then run a standard crossterm poll loop.
+**Sync event loop.** No async runtime needed. Run the scan before entering the TUI (with a progress message on stdout), then enter the interactive loop.
 
-**Deletion order: remote first, then local.** For `closed` mode (scope: both), delete the remote branch first. If remote deletion fails, skip local deletion and report the error. This avoids the unrecoverable state where the local ref is gone but the remote branch persists.
+**Scan before TUI.** Run `git for-each-ref` and collect results before entering ratatui's alternate screen. Show a "Scanning branches..." message on stdout during the scan. If zero branches match, print a message and exit — no TUI needed.
 
 ### TUI design
 
 ```
-┌─ git-broom: gone branches (3 of 17) ─────────────────────────┐
+┌─ git-broom: 3 of 17 gone branches ───────────────────────────┐
 │                                                                │
 │   >> ✗ feature/auth-refactor    2d ago   "refactor auth m..."  │
 │      ✗ fix/cart-total           5d ago   "fix cart calcula..."  │
@@ -89,16 +75,16 @@ git for-each-ref --format='%(refname:short)\t%(upstream:short)\t%(upstream:track
 │      - experiment/fast-cache    3w ago   "try caching str..."  │
 │                                                                │
 ├────────────────────────────────────────────────────────────────┤
-│ j/k: navigate  d: delete  s: keep  a: all delete  q: quit     │
+│ j/k: navigate  d: delete  s: keep  a: all delete  Enter: go   │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 - `>>` highlights selected row
 - `✗` = marked for deletion (red), `✓` = marked to keep (green), `-` = undecided (dim)
 - Each row shows: branch name, relative commit date, truncated commit message
-- For `closed` mode, also show PR status (e.g., `#142 closed`)
 - Progress counter in title bar
 - Full navigable list — user can go back and change decisions
+- Keybindings shown in the footer — no help overlay needed
 
 ### Keybindings
 
@@ -110,114 +96,121 @@ git for-each-ref --format='%(refname:short)\t%(upstream:short)\t%(upstream:track
 | `s` | Mark to keep |
 | `a` | Mark all for deletion |
 | `u` | Unmark all |
-| `Enter` | Finish and write TSV |
-| `q` / `Esc` | Quit without saving |
-| `?` | Show help overlay |
+| `Enter` | Confirm and execute |
+| `q` / `Esc` | Quit without deleting |
 
-### TSV plan format
+### Confirmation flow
 
-```tsv
-branch	scope
-feature/auth-refactor	local
-fix/cart-total	local
-old-stack/part-1	both
-```
+When the user presses `Enter`:
+1. Exit TUI (leave alternate screen)
+2. Print a summary: "About to delete N branches:" followed by the list
+3. Prompt `Proceed? [y/N]`
+4. On `y`: run `git branch -D` for each, print results
+5. Print summary: "Deleted 12 branches. 1 failed."
 
-- Tab-separated, with header row
-- `scope` is one of: `local`, `remote`, `both`
-- Written to `.git/broom-plan.tsv` (inside `.git` so it's invisible to the project)
-- Overwritten on each scan
+### `--batch` mode
 
-### Execute phase
+For scripting/composability:
 
 ```
-git-broom execute [--dry-run] [path]
+git-broom --batch
 ```
 
-- Defaults to `.git/broom-plan.tsv` if no path given
-- Shows a summary table of planned deletions
-- User confirms with `y` to proceed, or `n` to abort
-- For each branch: execute deletion, print result (success/failure)
-- Print summary at end: "Deleted 12 branches (3 local, 9 local+remote). 1 failed."
-- `--dry-run` prints what would happen without doing it
+Prints one branch name per line to stdout. No TUI, no confirmation. Composable:
+
+```
+git-broom --batch | xargs git branch -D
+```
+
+### `--dry-run` mode
+
+```
+git-broom --dry-run
+```
+
+Runs the scan and prints matching branches with their metadata, but does not enter the TUI or delete anything.
 
 ### Pre-flight checks
 
-Before scan or execute, validate:
-- Running inside a git repo
+Before scanning, validate:
+- Running inside a git repo (check for `.git`)
 - Not a bare repo
-- Can identify current branch (handle detached HEAD)
-- For `closed` mode: `gh` is installed and authenticated (`gh auth status`)
-- For `closed` mode: remote `origin` exists (configurable via `--remote`)
+- Can identify current branch (handle detached HEAD gracefully)
 
 ### Branch protection
 
 These branches are **never** shown for deletion:
-- The currently checked-out branch (show with "current" label if it matches filter)
-- Branches checked out in other worktrees (`git worktree list`)
-- `main`, `master`, and the repo's default branch (detected via `gh repo view --json defaultBranchRef` or falling back to `main`/`master`)
+- The currently checked-out branch (show with "(current)" label if it matches filter)
+- Branches checked out in other worktrees (`git worktree list --porcelain`)
+- `main` and `master`
 
-### Edge cases handled
+### Edge cases
 
 | Situation | Behavior |
 |---|---|
-| Zero matching branches | Print message, exit 0, no TUI |
+| Zero matching branches | Print "No gone branches found.", exit 0 |
 | Current branch matches filter | Show in list with "(current)" label, forced to keep |
 | Branch in another worktree | Show with "(worktree)" label, forced to keep |
-| TSV references already-deleted branch | Skip with warning during execute |
-| `gh` rate limited | Fail gracefully, show partial results with warning |
-| Remote deletion fails, local succeeds | N/A — remote deleted first; on failure, local skipped |
-| Branch name with slashes | Handled naturally by git commands |
+| `git branch -D` fails | Print error, continue with remaining branches |
 | 100+ matching branches | Bulk keybindings (`a` mark all, `u` unmark all) |
+| Detached HEAD | No current branch to protect, scanning works normally |
 
 ## Acceptance Criteria
 
-- [ ] `git-broom scan gone` shows branches whose upstream was deleted, user marks keep/delete, writes TSV
-- [ ] `git-broom scan unpushed` shows branches with no remote tracking branch
-- [ ] `git-broom scan closed` shows branches with closed/no PRs (requires `gh`)
-- [ ] `git-broom execute` reads TSV, confirms with user, deletes branches
-- [ ] `git-broom execute --dry-run` shows what would be deleted without acting
-- [ ] Current branch and worktree branches are protected from deletion
-- [ ] `main`/`master`/default branch are protected
-- [ ] Tool echoes next command after scan phase completes
+- [ ] `git-broom` shows branches whose upstream was deleted, user marks keep/delete, confirms, branches are deleted
+- [ ] `git-broom --batch` prints gone branch names to stdout
+- [ ] `git-broom --dry-run` prints matching branches without deleting
+- [ ] Current branch, worktree branches, and main/master are protected
+- [ ] Zero matching branches prints a message and exits cleanly
+- [ ] Terminal is always restored on exit, including panics
 - [ ] Works on macOS and Linux
+- [ ] Integration tests using temp git repos
 - [ ] Published to crates.io (`cargo install git-broom`)
 - [ ] Homebrew tap available (`brew install <user>/tap/git-broom`)
 
-## Dependencies & Risks
-
-### Dependencies
+## Dependencies
 
 | Crate | Purpose |
 |---|---|
 | `ratatui` ~0.29 | TUI framework |
 | `crossterm` ~0.28 | Terminal backend |
-| `clap` 4 (derive) | CLI argument parsing |
-| `serde` + `serde_json` | Parsing `gh` JSON output |
 | `anyhow` | Error handling |
 
-External tools: `git` (required), `gh` (required only for `closed` mode).
+External tools: `git` (required).
 
-### Risks
+No `clap` — parse `std::env::args()` for `--batch` and `--dry-run`. Add clap later when subcommands arrive (v2 modes).
+
+No `serde` / `serde_json` — not needed until `closed` mode (v2).
+
+## Risks
 
 | Risk | Mitigation |
 |---|---|
-| Remote branch deletion is irreversible | Remote-first deletion order; `--dry-run` flag; confirmation step |
-| `gh` API rate limits on large repos | Batch fetch all PRs in one call, not per-branch |
-| Stale TSV (branches change between scan and execute) | Execute validates each branch exists before deleting |
-| Terminal not restored on panic | `Drop`-based cleanup + panic hook that restores terminal |
+| `git branch -D` is destructive | Confirmation step; commits remain in reflog ~30 days |
+| Terminal not restored on panic | `Drop`-based cleanup + panic hook |
+| `git for-each-ref` format changes | Format is stable and documented; low risk |
 
-### Distribution
+## Distribution
 
 Use **cargo-dist** for automated cross-compilation, GitHub Releases, and Homebrew formula generation:
 - `cargo dist init` to scaffold CI
 - GitHub Actions matrix: `x86_64-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`
 - Auto-generated Homebrew formula in a `homebrew-tap` repo
 
+## Testing strategy
+
+- **Unit tests**: branch parsing logic, branch protection filtering
+- **Integration tests**: create temp git repos with `git init`, add branches with various tracking states, run the scanner, assert correct branches are identified
+- **TUI tests**: not in v1 — test the logic, not the rendering
+
+## Future work
+
+- `unpushed` mode — see `docs/plans/2026-04-10-feat-git-broom-unpushed-mode-plan.md`
+- `closed` mode — see `docs/plans/2026-04-10-feat-git-broom-closed-mode-plan.md`
+
 ## References
 
 - ratatui docs: https://docs.rs/ratatui/latest/ratatui/
 - crossterm docs: https://docs.rs/crossterm/latest/crossterm/
 - `git for-each-ref` format strings: `git help for-each-ref`
-- `gh pr list --json` fields: `gh pr list --help`
 - cargo-dist: https://opensource.axo.dev/cargo-dist/
