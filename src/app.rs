@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -107,6 +108,7 @@ pub struct Branch {
     pub name: String,
     pub upstream: Option<String>,
     pub upstream_track: String,
+    pub committed_at: i64,
     pub relative_date: String,
     pub subject: String,
     pub detail: Option<String>,
@@ -325,7 +327,6 @@ struct RepoView {
 #[derive(Debug, Clone, Deserialize)]
 struct PullRequestRecord {
     number: u64,
-    title: String,
     state: String,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
@@ -338,23 +339,79 @@ struct ClosedModeData {
     pull_requests: HashMap<String, PullRequestRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanProgress {
+    ValidatingRepository,
+    ReadingCurrentBranch,
+    ReadingWorktrees,
+    LoadingGithubData,
+    LoadingLocalBranches,
+    MatchingClosedBranches,
+}
+
+impl ScanProgress {
+    pub const TOTAL_STEPS: usize = 6;
+
+    pub fn step(self) -> usize {
+        match self {
+            Self::ValidatingRepository => 1,
+            Self::ReadingCurrentBranch => 2,
+            Self::ReadingWorktrees => 3,
+            Self::LoadingGithubData => 4,
+            Self::LoadingLocalBranches => 5,
+            Self::MatchingClosedBranches => 6,
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ValidatingRepository => "validating repository",
+            Self::ReadingCurrentBranch => "reading current branch",
+            Self::ReadingWorktrees => "reading linked worktrees",
+            Self::LoadingGithubData => "loading GitHub data",
+            Self::LoadingLocalBranches => "loading local branches",
+            Self::MatchingClosedBranches => "matching branches against GitHub state",
+        }
+    }
+}
+
 pub fn scan_selected_modes(
     repo: &Path,
     modes: &[CleanupMode],
     remote: &str,
 ) -> Result<Vec<CleanupGroup>> {
+    scan_selected_modes_with_progress(repo, modes, remote, |_, _| {})
+}
+
+pub fn scan_selected_modes_with_progress<F>(
+    repo: &Path,
+    modes: &[CleanupMode],
+    remote: &str,
+    mut progress: F,
+) -> Result<Vec<CleanupGroup>>
+where
+    F: FnMut(ScanProgress, Option<&str>),
+{
+    progress(ScanProgress::ValidatingRepository, None);
     ensure_work_tree(repo)?;
 
+    progress(ScanProgress::ReadingCurrentBranch, None);
+    let current_branch = current_branch(repo)?;
+
+    progress(ScanProgress::ReadingWorktrees, None);
+    let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
+
     let closed_mode_data = if modes.contains(&CleanupMode::Closed) {
+        progress(ScanProgress::LoadingGithubData, None);
         Some(load_closed_mode_data(repo, remote)?)
     } else {
         None
     };
-    let current_branch = current_branch(repo)?;
-    let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
     let default_branch = closed_mode_data
         .as_ref()
         .map(|data| data.default_branch.as_str());
+
+    progress(ScanProgress::LoadingLocalBranches, None);
     let all_branches = load_branch_inventory(
         repo,
         current_branch.as_deref(),
@@ -371,6 +428,7 @@ pub fn scan_selected_modes(
                     .as_ref()
                     .expect("closed mode data loaded when mode selected"),
                 remote,
+                &mut progress,
             )),
             _ => {
                 let branches = all_branches
@@ -414,7 +472,7 @@ fn load_branch_inventory(
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname:short)\u{1f}%(upstream:short)\u{1f}%(upstream:track)\u{1f}%(committerdate:relative)\u{1f}%(subject)",
+            "--format=%(refname:short)\u{1f}%(upstream:short)\u{1f}%(upstream:track)\u{1f}%(committerdate:unix)\u{1f}%(subject)",
             "refs/heads/",
         ],
     )?;
@@ -430,19 +488,33 @@ fn load_branch_inventory(
         branches.push(branch);
     }
 
-    branches.sort_by(|left, right| left.name.cmp(&right.name));
+    branches.sort_by(|left, right| {
+        right
+            .committed_at
+            .cmp(&left.committed_at)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     Ok(branches)
 }
 
-fn build_closed_groups(
+fn build_closed_groups<F>(
     all_branches: &[Branch],
     closed_mode_data: &ClosedModeData,
     remote: &str,
-) -> Vec<CleanupGroup> {
+    progress: &mut F,
+) -> Vec<CleanupGroup>
+where
+    F: FnMut(ScanProgress, Option<&str>),
+{
     let mut closed = Vec::new();
     let mut merged = Vec::new();
 
     for branch in all_branches {
+        progress(
+            ScanProgress::MatchingClosedBranches,
+            Some(branch.name.as_str()),
+        );
+
         if branch.protections.iter().any(|protection| {
             matches!(
                 protection,
@@ -464,25 +536,18 @@ fn build_closed_groups(
         match closed_mode_data.pull_requests.get(head_ref_name) {
             Some(pr) if pr.state == "OPEN" => continue,
             Some(pr) if pr.state == "MERGED" => {
-                branch.detail = Some(format!("#{} merged · {} · {}", pr.number, pr.title, pr.url));
+                branch.detail = Some(format!("PR #{} · {}", pr.number, pr.url));
                 merged.push(branch);
             }
             Some(pr) if pr.state == "CLOSED" => {
-                branch.detail = Some(format!("#{} closed · {} · {}", pr.number, pr.title, pr.url));
+                branch.detail = Some(format!("PR #{} · {}", pr.number, pr.url));
                 closed.push(branch);
             }
             Some(pr) => {
-                branch.detail = Some(format!(
-                    "#{} {} · {} · {}",
-                    pr.number,
-                    pr.state.to_lowercase(),
-                    pr.title,
-                    pr.url
-                ));
+                branch.detail = Some(format!("PR #{} · {}", pr.number, pr.url));
                 closed.push(branch);
             }
             None => {
-                branch.detail = Some(String::from("no PR"));
                 closed.push(branch);
             }
         }
@@ -508,7 +573,6 @@ fn load_closed_mode_data(repo: &Path, remote: &str) -> Result<ClosedModeData> {
     ensure_remote_exists(repo, remote)?;
     ensure_gh_installed()?;
     ensure_gh_authenticated(repo)?;
-
     let repo_view: RepoView = serde_json::from_str(&gh_output(
         repo,
         &["repo", "view", "--json", "defaultBranchRef"],
@@ -612,7 +676,8 @@ fn parse_branch_line(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     let upstream_track = fields.next()?.trim().to_string();
-    let relative_date = fields.next()?.trim().to_string();
+    let committed_at = fields.next()?.trim().parse::<i64>().ok()?;
+    let relative_date = format_relative_age(committed_at);
     let subject = fields.next()?.trim().to_string();
 
     let mut protections = Vec::new();
@@ -636,6 +701,7 @@ fn parse_branch_line(
         name,
         upstream,
         upstream_track,
+        committed_at,
         relative_date,
         subject,
         detail: None,
@@ -656,6 +722,49 @@ fn ensure_work_tree(repo: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn format_relative_age(committed_at: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_secs() as i64;
+
+    format_age_from_seconds(now.saturating_sub(committed_at).max(0) as u64)
+}
+
+fn format_age_from_seconds(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const WEEK: u64 = 7 * DAY;
+    const MONTH: u64 = 30 * DAY;
+
+    if seconds < MINUTE {
+        return unit_label(seconds.max(1), "second");
+    }
+    if seconds < HOUR {
+        return unit_label(seconds / MINUTE, "minute");
+    }
+    if seconds < DAY {
+        return unit_label(seconds / HOUR, "hour");
+    }
+    if seconds < WEEK {
+        return unit_label(seconds / DAY, "day");
+    }
+    if seconds < MONTH {
+        return unit_label(seconds / WEEK, "week");
+    }
+
+    unit_label(seconds / MONTH, "month")
+}
+
+fn unit_label(value: u64, unit: &str) -> String {
+    if value == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{value} {unit}s ago")
+    }
 }
 
 fn current_branch(repo: &Path) -> Result<Option<String>> {
@@ -788,12 +897,19 @@ fn git_output_raw(repo: &Path, args: &[&str]) -> Result<Output> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{App, CleanupGroup, CleanupMode, Decision, Protection, parse_branch_line};
+    use super::{
+        App, CleanupGroup, CleanupMode, Decision, FIELD_SEPARATOR, Protection,
+        format_age_from_seconds, parse_branch_line,
+    };
+
+    const SAMPLE_TIMESTAMP: &str = "1700000000";
 
     #[test]
     fn parse_branch_line_marks_current_branch_as_protected() {
         let branch = parse_branch_line(
-            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
             Some("feature/foo"),
             None,
             &HashSet::new(),
@@ -809,7 +925,9 @@ mod tests {
     fn parse_branch_line_marks_other_worktree_branch_as_protected() {
         let worktree_branches = HashSet::from([String::from("feature/foo")]);
         let branch = parse_branch_line(
-            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
             Some("main"),
             None,
             &worktree_branches,
@@ -823,7 +941,9 @@ mod tests {
     #[test]
     fn parse_branch_line_marks_main_branch_as_protected() {
         let branch = parse_branch_line(
-            "main\u{1f}origin/main\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            &format!(
+                "main{FIELD_SEPARATOR}origin/main{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
             None,
             None,
             &HashSet::new(),
@@ -837,7 +957,9 @@ mod tests {
     #[test]
     fn cleanup_mode_matches_gone_branches() {
         let branch = parse_branch_line(
-            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
             None,
             None,
             &HashSet::new(),
@@ -851,7 +973,9 @@ mod tests {
     #[test]
     fn cleanup_mode_matches_unpushed_branches() {
         let branch = parse_branch_line(
-            "feature/foo\u{1f}\u{1f}\u{1f}2 days ago\u{1f}test subject",
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}{FIELD_SEPARATOR}{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
             None,
             None,
             &HashSet::new(),
@@ -865,7 +989,9 @@ mod tests {
     #[test]
     fn toggle_delete_marks_branch_for_deletion() {
         let branch = parse_branch_line(
-            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
             None,
             None,
             &HashSet::new(),
@@ -887,7 +1013,9 @@ mod tests {
     #[test]
     fn toggle_delete_shows_modal_for_protected_branch() {
         let branch = parse_branch_line(
-            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
             Some("feature/foo"),
             None,
             &HashSet::new(),
@@ -909,5 +1037,13 @@ mod tests {
                 .contains("Current branch is ineligible for cleanup.")
         );
         assert_eq!(app.branches[0].decision, Decision::Undecided);
+    }
+
+    #[test]
+    fn format_age_uses_months_for_long_durations() {
+        assert_eq!(
+            format_age_from_seconds(18 * 30 * 24 * 60 * 60),
+            "18 months ago"
+        );
     }
 }

@@ -157,12 +157,11 @@ fn dry_run_groups_closed_mode_by_reason() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert!(stdout.contains("[closed: closed pull request or no pull request on GitHub]"));
     assert!(stdout.contains("feature/closed"));
-    assert!(stdout.contains("#1 closed · Closed PR · https://example.test/pr/1"));
+    assert!(stdout.contains("PR #1 · https://example.test/pr/1"));
     assert!(stdout.contains("feature/no-pr"));
-    assert!(stdout.contains("no PR"));
     assert!(stdout.contains("[merged: pull request merged but remote branch still exists]"));
     assert!(stdout.contains("feature/merged"));
-    assert!(stdout.contains("#2 merged · Merged PR · https://example.test/pr/2"));
+    assert!(stdout.contains("PR #2 · https://example.test/pr/2"));
     assert!(!stdout.contains("feature/open"));
 }
 
@@ -375,6 +374,7 @@ fn tracked_branch(name: &str, remote: &str) -> Branch {
         name: name.to_string(),
         upstream: Some(format!("{remote}/{name}")),
         upstream_track: String::new(),
+        committed_at: 1_700_000_000,
         relative_date: String::from("1 day ago"),
         subject: String::from("subject"),
         detail: None,

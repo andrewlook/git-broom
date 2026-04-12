@@ -1,5 +1,5 @@
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::panic;
 use std::path::Path;
 use std::process;
@@ -12,8 +12,8 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use git_broom::app::{
-    App, Branch, CleanupGroup, CleanupMode, DeleteResult, IMPLEMENTED_MODES, delete_branches,
-    scan_selected_modes,
+    App, Branch, CleanupGroup, CleanupMode, DeleteResult, IMPLEMENTED_MODES, ScanProgress,
+    delete_branches, scan_selected_modes, scan_selected_modes_with_progress,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -28,7 +28,17 @@ fn main() {
 fn run() -> Result<()> {
     let cli = parse_cli(env::args().skip(1))?;
     let repo = env::current_dir()?;
-    let groups = scan_selected_modes(&repo, &cli.modes, &cli.remote)?;
+    let groups = if cli.modes.contains(&CleanupMode::Closed) {
+        let mut status = ScanStatusLine::new();
+        let groups =
+            scan_selected_modes_with_progress(&repo, &cli.modes, &cli.remote, |stage, detail| {
+                status.update(stage, detail);
+            })?;
+        status.finish();
+        groups
+    } else {
+        scan_selected_modes(&repo, &cli.modes, &cli.remote)?
+    };
 
     match cli.output {
         OutputMode::Interactive => run_interactive(&repo, &cli.remote, groups),
@@ -416,11 +426,96 @@ fn left_pad(value: &str, width: usize) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "usage: git-broom [gone] [unpushed] [closed] [--remote <name>] [--batch | --dry-run]"
+    r#"git-broom cleans up stale local branches in step-by-step review groups.
+
+Usage:
+  git-broom [gone] [unpushed] [closed] [--remote <name>] [--batch | --dry-run]
+
+Cleanup modes:
+  gone       Upstream branch no longer exists on the remote.
+  unpushed   Local branch has no upstream tracking branch configured.
+  closed     Remote-tracked branch has a closed or missing GitHub PR.
+             This can expand into multiple review groups, such as:
+             - closed: closed PR or no PR
+             - merged: PR merged but remote branch still exists
+
+How it works:
+  - With no modes, git-broom reviews all implemented cleanup modes in order.
+  - Interactive mode walks one group at a time and asks for confirmation
+    before deleting that group's selected branches.
+  - --dry-run and --batch print a readable preview of the same grouped flow
+    without deleting anything.
+  - Protected branches stay visible for context but cannot be deleted.
+
+Options:
+  --dry-run        Show the grouped preview without deleting anything.
+  --batch          Print the same readable grouped preview without entering the TUI.
+  --remote <name>  Remote to use for closed mode. Default: origin.
+  -h, --help       Show this help text.
+
+Examples:
+  git-broom
+      Review all cleanup modes in order.
+
+  git-broom gone unpushed
+      Only review gone and unpushed branches.
+
+  git-broom closed --dry-run
+      Preview closed/merged GitHub-backed cleanup groups.
+
+  git-broom closed --remote upstream
+      Use the upstream remote instead of origin for closed mode.
+"#
 }
 
 fn print_usage() {
     println!("{}", usage_text());
+}
+
+struct ScanStatusLine {
+    enabled: bool,
+}
+
+impl ScanStatusLine {
+    fn new() -> Self {
+        Self {
+            enabled: io::stderr().is_terminal(),
+        }
+    }
+
+    fn update(&mut self, stage: ScanProgress, detail: Option<&str>) {
+        if !self.enabled {
+            return;
+        }
+
+        let detail_suffix = detail
+            .map(|value| format!(": {}", fit_for_column(value, 36)))
+            .unwrap_or_default();
+        eprint!(
+            "\r\x1b[2Kgit-broom: [{}/{}] {}{}...",
+            stage.step(),
+            ScanProgress::TOTAL_STEPS,
+            stage.message(),
+            detail_suffix
+        );
+        let _ = io::stderr().flush();
+    }
+
+    fn finish(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
+        eprint!("\r\x1b[2K");
+        let _ = io::stderr().flush();
+        self.enabled = false;
+    }
+}
+
+impl Drop for ScanStatusLine {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 type PanicHook = dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static;
@@ -482,6 +577,7 @@ mod tests {
             name: name.to_string(),
             upstream: Some(format!("origin/{name}")),
             upstream_track: "[gone]".to_string(),
+            committed_at: 1_700_000_000,
             relative_date: "2 days ago".to_string(),
             subject: "subject line".to_string(),
             detail: None,
