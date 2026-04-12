@@ -7,7 +7,7 @@ Current behavior focuses on two cleanup tranches:
 - `gone`: branches whose upstream tracking ref is `[gone]`
 - `unpushed`: local branches with no upstream configured
 - interactive mode walks the selected tranches one by one
-- `--batch` prints deletable branch names for the selected tranches
+- `--batch` prints the same readable deletion preview without entering the TUI
 - `--dry-run` prints grouped previews without deleting anything
 
 ## Requirements

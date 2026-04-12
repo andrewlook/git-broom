@@ -153,27 +153,15 @@ fn run_interactive(repo: &Path, tranches: Vec<Tranche>) -> Result<()> {
 }
 
 fn run_batch(tranches: &[Tranche]) -> Result<()> {
-    let branches = tranches
-        .iter()
-        .flat_map(|tranche| tranche.branches.iter())
-        .filter(|branch| branch.is_deletable())
-        .map(|branch| branch.name.as_str())
-        .collect::<Vec<_>>();
-
-    if branches.is_empty() {
-        eprintln!("No deletable branches found for selected cleanup modes.");
-        return Ok(());
-    }
-
-    for branch in branches {
-        println!("{branch}");
+    for line in format_preview_lines(tranches) {
+        println!("{line}");
     }
 
     Ok(())
 }
 
 fn run_dry_run(tranches: &[Tranche]) -> Result<()> {
-    for line in format_dry_run_lines(tranches) {
+    for line in format_preview_lines(tranches) {
         println!("{line}");
     }
 
@@ -260,17 +248,18 @@ fn print_delete_results(mode: CleanupMode, results: &[DeleteResult]) -> (usize, 
     (deleted, failed)
 }
 
-fn format_dry_run_lines(tranches: &[Tranche]) -> Vec<String> {
+fn format_preview_lines(tranches: &[Tranche]) -> Vec<String> {
     let mut lines = Vec::new();
+    let (branch_width, commit_width, age_width) = preview_column_widths();
+    let total_width = preview_total_width(branch_width, commit_width, age_width);
+    let step_count = tranches
+        .iter()
+        .filter(|tranche| !tranche.branches.is_empty())
+        .count();
+    let mut step_index = 0;
 
     for tranche in tranches {
-        let deletable = tranche
-            .branches
-            .iter()
-            .filter(|branch| branch.is_deletable())
-            .collect::<Vec<_>>();
-
-        if deletable.is_empty() {
+        if tranche.branches.is_empty() {
             continue;
         }
 
@@ -278,29 +267,92 @@ fn format_dry_run_lines(tranches: &[Tranche]) -> Vec<String> {
             lines.push(String::new());
         }
 
-        lines.push(format!(
-            "{} ({})",
-            tranche.mode.name(),
-            tranche.mode.description()
+        step_index += 1;
+        lines.push(format_preview_title(
+            tranche.mode,
+            step_index,
+            step_count,
+            total_width,
         ));
-        lines.extend(deletable.into_iter().map(format_dry_run_branch));
+        lines.push(format_preview_header(branch_width, commit_width, age_width));
+        lines.push(format_preview_rule(branch_width, commit_width, age_width));
+        lines.extend(
+            tranche
+                .branches
+                .iter()
+                .map(|branch| format_preview_branch(branch, branch_width, commit_width, age_width)),
+        );
     }
 
     if lines.is_empty() {
         return vec![String::from(
-            "No deletable branches found for selected cleanup modes.",
+            "No branches found for selected cleanup modes.",
         )];
     }
 
     lines
 }
 
-fn format_dry_run_branch(branch: &Branch) -> String {
+fn format_preview_title(
+    mode: CleanupMode,
+    step_index: usize,
+    step_count: usize,
+    total_width: usize,
+) -> String {
+    let left = format!("  git-broom   [{}: {}]", mode.name(), mode.description());
+    let right = format!("({step_index}/{step_count})");
+    let spacer_width = total_width.saturating_sub(left.chars().count() + right.chars().count());
+
+    format!("{left}{}{right}", " ".repeat(spacer_width.max(1)))
+}
+
+fn format_preview_header(branch_width: usize, commit_width: usize, age_width: usize) -> String {
     format!(
-        "  {:<40} ({})",
-        fit_for_column(&branch.name, 40),
-        branch.relative_date
+        "  {}  {}  {}",
+        pad("branch name", branch_width),
+        left_pad("last commit", commit_width),
+        left_pad("age", age_width),
     )
+}
+
+fn format_preview_rule(branch_width: usize, commit_width: usize, age_width: usize) -> String {
+    format!(
+        "  {}  {}  {}",
+        pad(
+            "-".repeat("branch name".chars().count()).as_str(),
+            branch_width
+        ),
+        left_pad(
+            "-".repeat("last commit".chars().count()).as_str(),
+            commit_width
+        ),
+        left_pad("-".repeat("age".chars().count()).as_str(), age_width),
+    )
+}
+
+fn format_preview_branch(
+    branch: &Branch,
+    branch_width: usize,
+    commit_width: usize,
+    age_width: usize,
+) -> String {
+    format!(
+        "  {}  {}  {}",
+        pad(&branch.display_name(), branch_width),
+        left_pad(
+            &format!("\"{}\"", truncate(&branch.subject, commit_width)),
+            commit_width,
+        ),
+        left_pad(&branch.relative_date, age_width),
+    )
+}
+
+fn preview_column_widths() -> (usize, usize, usize) {
+    (38, 28, 14)
+}
+
+fn preview_total_width(branch_width: usize, commit_width: usize, age_width: usize) -> usize {
+    2 + branch_width + 2 + commit_width + 2 + age_width
 }
 
 fn fit_for_column(value: &str, width: usize) -> String {
@@ -315,6 +367,31 @@ fn fit_for_column(value: &str, width: usize) -> String {
 
     let truncated = value.chars().take(width - 3).collect::<String>();
     format!("{truncated}...")
+}
+
+fn truncate(value: &str, width: usize) -> String {
+    fit_for_column(value, width)
+}
+
+fn pad(value: &str, width: usize) -> String {
+    let visible = value.chars().count();
+    if visible >= width {
+        return truncate(value, width);
+    }
+
+    let mut padded = value.to_string();
+    padded.push_str(&" ".repeat(width - visible));
+    padded
+}
+
+fn left_pad(value: &str, width: usize) -> String {
+    let truncated = truncate(value, width);
+    let visible = truncated.chars().count();
+    if visible >= width {
+        return truncated;
+    }
+
+    format!("{}{}", " ".repeat(width - visible), truncated)
 }
 
 fn usage_text() -> &'static str {
@@ -377,7 +454,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use git_broom::app::{Branch, CleanupMode, Decision, Tranche};
 
-    use super::{OutputMode, fit_for_column, format_dry_run_lines, is_immediate_exit, parse_cli};
+    use super::{OutputMode, fit_for_column, format_preview_lines, is_immediate_exit, parse_cli};
 
     fn sample_branch(name: &str) -> Branch {
         Branch {
@@ -421,8 +498,8 @@ mod tests {
     }
 
     #[test]
-    fn format_dry_run_lines_groups_branches_by_mode() {
-        let lines = format_dry_run_lines(&[
+    fn format_preview_lines_groups_branches_by_mode() {
+        let lines = format_preview_lines(&[
             Tranche {
                 mode: CleanupMode::Gone,
                 branches: vec![sample_branch("feature/delete-me")],
@@ -433,13 +510,19 @@ mod tests {
             },
         ]);
 
-        assert_eq!(lines[0], "gone (upstream branch no longer exists)");
-        assert!(lines[1].contains("feature/delete-me"));
-        assert_eq!(
-            lines[3],
-            "unpushed (no upstream tracking branch is configured)"
+        assert!(lines[0].starts_with("  git-broom   [gone: upstream branch no longer exists]"));
+        assert!(lines[0].ends_with("(1/2)"));
+        assert!(lines[1].contains("branch name"));
+        assert!(lines[2].contains("-----------"));
+        assert!(lines[3].contains("feature/delete-me"));
+        assert!(
+            lines[5]
+                .starts_with("  git-broom   [unpushed: no upstream tracking branch is configured]")
         );
-        assert!(lines[4].contains("feature/local-only"));
+        assert!(lines[5].ends_with("(2/2)"));
+        assert!(lines[6].contains("branch name"));
+        assert!(lines[7].contains("-----------"));
+        assert!(lines[8].contains("feature/local-only"));
     }
 
     #[test]
