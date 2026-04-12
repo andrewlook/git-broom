@@ -149,13 +149,13 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
                 }
 
                 println!(
-                    "About to delete {} {} branches ({}):",
+                    "About to run these cleanup commands for {} {} branches ({}):",
                     branches_to_delete.len(),
                     app.group_name,
                     app.group_description
                 );
-                for branch in &branches_to_delete {
-                    println!("  {}", branch.name);
+                for command in planned_delete_commands(app.mode, remote, &branches_to_delete) {
+                    println!("  {command}");
                 }
 
                 if !prompt_for_confirmation()? {
@@ -274,6 +274,26 @@ fn print_delete_results(group_name: &str, results: &[DeleteResult]) -> (usize, u
     println!("{group_name}: deleted {deleted} branches. {failed} failed.");
 
     (deleted, failed)
+}
+
+fn planned_delete_commands(mode: CleanupMode, remote: &str, branches: &[&Branch]) -> Vec<String> {
+    let mut commands = Vec::new();
+
+    for branch in branches {
+        if mode == CleanupMode::Closed
+            && let Some(remote_branch) = branch.upstream_branch_name()
+        {
+            commands.push(format!(
+                "git push {} :refs/heads/{}",
+                shell_quote(remote),
+                shell_quote(remote_branch),
+            ));
+        }
+
+        commands.push(format!("git branch -D {}", shell_quote(&branch.name)));
+    }
+
+    commands
 }
 
 fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<String> {
@@ -451,6 +471,21 @@ fn fit_for_column(value: &str, width: usize) -> String {
 
     let truncated = value.chars().take(width - 3).collect::<String>();
     format!("{truncated}...")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return String::from("''");
+    }
+
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.' | ':'))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn truncate(value: &str, width: usize) -> String {
@@ -668,7 +703,10 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use git_broom::app::{Branch, CleanupGroup, CleanupMode, Decision};
 
-    use super::{OutputMode, fit_for_column, format_preview_lines, is_immediate_exit, parse_cli};
+    use super::{
+        OutputMode, fit_for_column, format_preview_lines, is_immediate_exit, parse_cli,
+        planned_delete_commands, shell_quote,
+    };
 
     fn sample_branch(name: &str) -> Branch {
         Branch {
@@ -833,5 +871,25 @@ mod tests {
             KeyCode::Char('d'),
             KeyModifiers::NONE,
         )));
+    }
+
+    #[test]
+    fn planned_delete_commands_include_remote_and_local_cleanup_for_closed_mode() {
+        let branch = sample_branch("feature/closed");
+        let commands = planned_delete_commands(CleanupMode::Closed, "origin", &[&branch]);
+
+        assert_eq!(
+            commands,
+            vec![
+                String::from("git push origin :refs/heads/feature/closed"),
+                String::from("git branch -D feature/closed"),
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_quote_adds_quotes_for_special_characters() {
+        assert_eq!(shell_quote("feature/ok"), "feature/ok");
+        assert_eq!(shell_quote("feature branch"), "'feature branch'");
     }
 }

@@ -843,8 +843,9 @@ fn delete_closed_branch(repo: &Path, remote: &str, branch: &Branch) -> DeleteRes
         };
     };
 
+    let remote_ref = format!(":refs/heads/{remote_branch}");
     match Command::new("git")
-        .args(["push", remote, &format!(":{remote_branch}")])
+        .args(["push", remote, &remote_ref])
         .current_dir(repo)
         .output()
     {
@@ -852,7 +853,10 @@ fn delete_closed_branch(repo: &Path, remote: &str, branch: &Branch) -> DeleteRes
         Ok(output) => DeleteResult {
             branch: branch.name.clone(),
             success: false,
-            message: command_message(&output),
+            message: format!(
+                "git push {remote} {remote_ref} failed: {}",
+                command_message(&output)
+            ),
         },
         Err(error) => DeleteResult {
             branch: branch.name.clone(),
@@ -876,7 +880,11 @@ fn delete_local_branch(repo: &Path, branch: &Branch) -> DeleteResult {
         Ok(output) => DeleteResult {
             branch: branch.name.clone(),
             success: false,
-            message: command_message(&output),
+            message: format!(
+                "git branch -D {} failed: {}",
+                branch.name,
+                command_message(&output)
+            ),
         },
         Err(error) => DeleteResult {
             branch: branch.name.clone(),
@@ -887,9 +895,15 @@ fn delete_local_branch(repo: &Path, branch: &Branch) -> DeleteResult {
 }
 
 fn command_message(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stderr.is_empty() { stdout } else { stderr }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::from("command failed with no output"),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stderr}\n{stdout}"),
+    }
 }
 
 fn parse_branch_line(
