@@ -1,8 +1,9 @@
 use ratatui::Frame;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Branch, Decision};
 
@@ -60,30 +61,43 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     frame.render_stateful_widget(list, chunks[1], &mut state);
 
     let footer =
-        Paragraph::new("j/k: move  d: delete  s: keep  a: all  u: clear  Enter: review  q: quit");
+        Paragraph::new("j/k: move  d: toggle delete  a: all  u: clear  Enter: review  q: quit");
     frame.render_widget(footer, chunks[2]);
+
+    if let Some(modal) = &app.modal {
+        let area = centered_rect(72, 26, frame.area());
+        frame.render_widget(Clear, area);
+        let dialog = Paragraph::new(modal.message.as_str())
+            .block(Block::default().title(modal.title).borders(Borders::ALL))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        frame.render_widget(dialog, area);
+    }
 }
 
 fn render_branch(branch: &Branch) -> Line<'static> {
     let marker = match branch.decision {
         Decision::Delete => ("✗", Style::default().fg(Color::Red)),
-        Decision::Keep => ("✓", Style::default().fg(Color::Green)),
-        Decision::Undecided => ("-", Style::default().fg(Color::DarkGray)),
+        Decision::Undecided => ("·", Style::default().fg(Color::DarkGray)),
     };
 
-    let mut spans = vec![
+    let mut line_style = Style::default();
+    if branch.decision == Decision::Delete {
+        line_style = line_style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    if branch.is_protected() {
+        line_style = line_style.fg(Color::DarkGray);
+    }
+
+    let spans = vec![
         Span::styled(format!("{} ", marker.0), marker.1),
-        Span::raw(pad(&branch.display_name(), 30)),
+        Span::styled(pad(&branch.display_name(), 38), line_style),
         Span::styled(
             pad(&branch.relative_date, 12),
-            Style::default().fg(Color::DarkGray),
+            line_style.fg(Color::DarkGray),
         ),
-        Span::raw(format!("\"{}\"", truncate(&branch.subject, 40))),
+        Span::styled(format!("\"{}\"", truncate(&branch.subject, 32)), line_style),
     ];
-
-    if branch.is_protected() {
-        spans.push(Span::styled(" locked", Style::default().fg(Color::Yellow)));
-    }
 
     Line::from(spans)
 }
@@ -110,4 +124,24 @@ fn truncate(value: &str, width: usize) -> String {
         .take(width.saturating_sub(1))
         .collect::<String>()
         + "…"
+}
+
+fn centered_rect(horizontal_percent: u16, vertical_percent: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - vertical_percent) / 2),
+            Constraint::Percentage(vertical_percent),
+            Constraint::Percentage((100 - vertical_percent) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - horizontal_percent) / 2),
+            Constraint::Percentage(horizontal_percent),
+            Constraint::Percentage((100 - horizontal_percent) / 2),
+        ])
+        .split(vertical[1])[1]
 }

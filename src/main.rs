@@ -199,11 +199,17 @@ fn run_tui(app: &mut App) -> Result<ExitAction> {
                 continue;
             }
 
+            if app.modal.is_some() {
+                if matches!(key.code, KeyCode::Enter) {
+                    app.dismiss_modal();
+                }
+                continue;
+            }
+
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => app.next(),
                 KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                KeyCode::Char('d') => app.mark_delete(),
-                KeyCode::Char('s') => app.mark_keep(),
+                KeyCode::Char('d') => app.toggle_delete(),
                 KeyCode::Char('a') => app.mark_all_delete(),
                 KeyCode::Char('u') => app.unmark_all(),
                 KeyCode::Enter => return Ok(ExitAction::Confirm),

@@ -56,7 +56,6 @@ impl CleanupMode {
 pub enum Decision {
     Undecided,
     Delete,
-    Keep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,10 +69,21 @@ pub enum Protection {
 impl Protection {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Current => "current",
+            Self::Current => "current branch",
             Self::Worktree => "worktree",
             Self::Main => "main",
             Self::Master => "master",
+        }
+    }
+
+    pub fn ineligible_message(self) -> &'static str {
+        match self {
+            Self::Current => "Current branch is ineligible for cleanup.",
+            Self::Worktree => {
+                "This branch is checked out in another worktree and is ineligible for cleanup."
+            }
+            Self::Main => "The main branch is ineligible for cleanup.",
+            Self::Master => "The master branch is ineligible for cleanup.",
         }
     }
 }
@@ -127,6 +137,13 @@ pub struct App {
     pub step_count: usize,
     pub branches: Vec<Branch>,
     pub selected: usize,
+    pub modal: Option<Modal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Modal {
+    pub title: &'static str,
+    pub message: String,
 }
 
 impl App {
@@ -137,6 +154,7 @@ impl App {
             step_count,
             branches: tranche.branches,
             selected: 0,
+            modal: None,
         }
     }
 
@@ -164,20 +182,26 @@ impl App {
         }
     }
 
-    pub fn mark_delete(&mut self) {
-        if let Some(branch) = self.branches.get_mut(self.selected)
-            && branch.is_deletable()
-        {
-            branch.decision = Decision::Delete;
-        }
-    }
+    pub fn toggle_delete(&mut self) {
+        let Some(branch) = self.branches.get_mut(self.selected) else {
+            return;
+        };
 
-    pub fn mark_keep(&mut self) {
-        if let Some(branch) = self.branches.get_mut(self.selected)
-            && branch.is_deletable()
-        {
-            branch.decision = Decision::Keep;
+        if let Some(protection) = branch.protections.first().copied() {
+            self.modal = Some(Modal {
+                title: "Branch Ineligible",
+                message: format!(
+                    "{} Press Enter to return to branch triage.",
+                    protection.ineligible_message()
+                ),
+            });
+            return;
         }
+
+        branch.decision = match branch.decision {
+            Decision::Undecided => Decision::Delete,
+            Decision::Delete => Decision::Undecided,
+        };
     }
 
     pub fn mark_all_delete(&mut self) {
@@ -212,6 +236,10 @@ impl App {
 
     pub fn delete_count(&self) -> usize {
         self.delete_candidates().len()
+    }
+
+    pub fn dismiss_modal(&mut self) {
+        self.modal = None;
     }
 }
 
@@ -337,12 +365,6 @@ fn parse_branch_line(
         protections.push(Protection::Master);
     }
 
-    let decision = if protections.is_empty() {
-        Decision::Undecided
-    } else {
-        Decision::Keep
-    };
-
     Some(Branch {
         name,
         upstream,
@@ -350,7 +372,7 @@ fn parse_branch_line(
         relative_date,
         subject,
         protections,
-        decision,
+        decision: Decision::Undecided,
     })
 }
 
@@ -439,7 +461,7 @@ fn git_output_raw(repo: &Path, args: &[&str]) -> Result<Output> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{CleanupMode, Decision, Protection, parse_branch_line};
+    use super::{App, CleanupMode, Decision, Protection, Tranche, parse_branch_line};
 
     #[test]
     fn parse_branch_line_marks_current_branch_as_protected() {
@@ -450,9 +472,9 @@ mod tests {
         )
         .expect("branch parsed");
 
-        assert_eq!(branch.decision, Decision::Keep);
+        assert_eq!(branch.decision, Decision::Undecided);
         assert_eq!(branch.protections, vec![Protection::Current]);
-        assert!(branch.display_name().contains("(current)"));
+        assert!(branch.display_name().contains("(current branch)"));
     }
 
     #[test]
@@ -465,7 +487,7 @@ mod tests {
         )
         .expect("branch parsed");
 
-        assert_eq!(branch.decision, Decision::Keep);
+        assert_eq!(branch.decision, Decision::Undecided);
         assert_eq!(branch.protections, vec![Protection::Worktree]);
     }
 
@@ -479,7 +501,7 @@ mod tests {
         .expect("branch parsed");
 
         assert_eq!(branch.protections, vec![Protection::Main]);
-        assert_eq!(branch.decision, Decision::Keep);
+        assert_eq!(branch.decision, Decision::Undecided);
     }
 
     #[test]
@@ -506,5 +528,58 @@ mod tests {
 
         assert!(CleanupMode::Unpushed.matches(&branch));
         assert!(!CleanupMode::Gone.matches(&branch));
+    }
+
+    #[test]
+    fn toggle_delete_marks_branch_for_deletion() {
+        let branch = parse_branch_line(
+            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        let mut app = App::from_tranche(
+            Tranche {
+                mode: CleanupMode::Gone,
+                branches: vec![branch],
+            },
+            1,
+            1,
+        );
+
+        app.toggle_delete();
+        assert_eq!(app.branches[0].decision, Decision::Delete);
+
+        app.toggle_delete();
+        assert_eq!(app.branches[0].decision, Decision::Undecided);
+    }
+
+    #[test]
+    fn toggle_delete_shows_modal_for_protected_branch() {
+        let branch = parse_branch_line(
+            "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            Some("feature/foo"),
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        let mut app = App::from_tranche(
+            Tranche {
+                mode: CleanupMode::Gone,
+                branches: vec![branch],
+            },
+            1,
+            1,
+        );
+
+        app.toggle_delete();
+
+        let modal = app.modal.expect("modal shown");
+        assert_eq!(modal.title, "Branch Ineligible");
+        assert!(
+            modal
+                .message
+                .contains("Current branch is ineligible for cleanup.")
+        );
+        assert_eq!(app.branches[0].decision, Decision::Undecided);
     }
 }
