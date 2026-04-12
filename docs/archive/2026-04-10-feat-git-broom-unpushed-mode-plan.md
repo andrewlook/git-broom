@@ -76,12 +76,12 @@ Same as v1: protect current branch, worktree branches, `main`, `master`.
 
 ## Acceptance Criteria
 
-- [ ] `git-broom unpushed` shows branches with no remote tracking in TUI
-- [ ] User can mark keep/delete and confirm deletions
-- [ ] `--batch` and `--dry-run` work with `unpushed` mode
-- [ ] Default interactive mode reviews all implemented tranches in sequence
-- [ ] `git-broom gone unpushed --dry-run` groups results by tranche with descriptive headers
-- [ ] Protected branches are excluded
+- [x] `git-broom unpushed` shows branches with no remote tracking in TUI
+- [x] User can mark keep/delete and confirm deletions
+- [x] `--batch` and `--dry-run` work with `unpushed` mode
+- [x] Default interactive mode reviews all implemented tranches in sequence
+- [x] `git-broom gone unpushed --dry-run` groups results by tranche with descriptive headers
+- [x] Protected branches are excluded
 
 ## Risks
 
