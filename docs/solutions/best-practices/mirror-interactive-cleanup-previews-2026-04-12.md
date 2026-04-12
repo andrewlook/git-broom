@@ -15,6 +15,7 @@ tags:
   - cli
   - tui
   - dry-run
+  - batch
   - destructive-workflow
   - preview
 ---
@@ -41,6 +42,18 @@ Then keep the entry points in `src/main.rs` thin:
 - `run_interactive()` walks the tranche list one step at a time.
 - `run_dry_run()` and `run_batch()` both call `format_preview_lines()` so the preview uses the same tranche ordering and visibility rules as the interactive flow.
 - `format_preview_title()` mirrors the title grammar from `render_title()` in `src/ui.rs`, including the tranche explanation and step count.
+
+That shared dispatch is the key guardrail:
+
+```rust
+let tranches = scan_selected_modes(&repo, &cli.modes)?;
+
+match cli.output {
+    OutputMode::Interactive => run_interactive(&repo, tranches),
+    OutputMode::Batch => run_batch(&tranches),
+    OutputMode::DryRun => run_dry_run(&tranches),
+}
+```
 
 For destructive actions, preserve safety semantics across every output mode:
 
@@ -88,9 +101,28 @@ The same principle applies to protected branches. Instead of disappearing from p
 
 That matches the behavior in `src/ui.rs`, where protected rows are dimmed and non-deletable, and the logic in `src/app.rs`, where `toggle_delete()` opens a modal instead of allowing the current branch to be marked for deletion.
 
+The preview formatter should also reuse the same row structure the TUI shows:
+
+```rust
+lines.push(format_preview_title(
+    tranche.mode,
+    step_index,
+    step_count,
+    total_width,
+));
+lines.push(format_preview_header(branch_width, commit_width, age_width));
+lines.push(format_preview_rule(branch_width, commit_width, age_width));
+lines.extend(
+    tranche
+        .branches
+        .iter()
+        .map(|branch| format_preview_branch(branch, branch_width, commit_width, age_width)),
+);
+```
+
 ## Related
 
 - `README.md` documents the user-facing tranche workflow and preview commands.
 - `docs/archive/2026-04-10-feat-git-broom-interactive-branch-cleanup-plan.md` captures the original gone-only cleanup design.
 - `docs/archive/2026-04-10-feat-git-broom-unpushed-mode-plan.md` captures the tranche expansion that introduced `unpushed`.
-- GitHub issues: `#1` (gone mode), `#2` (unpushed mode), `#3` (closed mode follow-up).
+- GitHub issues: `#1` Interactive git branch cleanup TUI (v1 - gone mode), `#2` git-broom unpushed mode (v2), `#3` git-broom closed mode (v2/v3).
