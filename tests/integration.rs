@@ -353,7 +353,27 @@ impl TestRepo {
         fs::create_dir_all(&bin_dir).expect("fake bin dir created");
         let script_path = bin_dir.join("gh");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'gh version 999.0.0'\n  exit 0\nfi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"repo\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s' '{{\"defaultBranchRef\":{{\"name\":\"main\"}}}}'\n  exit 0\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  cat <<'EOF'\n{pr_list_json}\nEOF\n  exit 0\nfi\nprintf 'unexpected gh invocation: %s\\n' \"$*\" >&2\nexit 1\n"
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo 'gh version 999.0.0'
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  printf '%s' '{{"defaultBranchRef":{{"name":"main"}}}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  cat <<'EOF'
+{pr_list_json}
+EOF
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#
         );
         fs::write(&script_path, script).expect("fake gh written");
         let output = Command::new("chmod")
@@ -373,7 +393,34 @@ impl TestRepo {
         fs::create_dir_all(&bin_dir).expect("fake bin dir created");
         let script_path = bin_dir.join("gh");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'gh version 999.0.0'\n  exit 0\nfi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"repo\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s' '{{\"defaultBranchRef\":{{\"name\":\"main\"}}}}'\n  exit 0\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  case \"$*\" in\n    *{search_term}*)\n      cat <<'EOF'\n{head_search_json}\nEOF\n      ;;\n    *)\n      printf '[]'\n      ;;\n  esac\n  exit 0\nfi\nprintf 'unexpected gh invocation: %s\\n' \"$*\" >&2\nexit 1\n"
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo 'gh version 999.0.0'
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  printf '%s' '{{"defaultBranchRef":{{"name":"main"}}}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  case "$*" in
+    *{search_term}*)
+      cat <<'EOF'
+{head_search_json}
+EOF
+      ;;
+    *)
+      printf '[]'
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#
         );
         fs::write(&script_path, script).expect("fake gh written");
         let output = Command::new("chmod")
