@@ -6,7 +6,7 @@ use std::process;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -199,6 +199,10 @@ fn run_tui(app: &mut App) -> Result<ExitAction> {
                 continue;
             }
 
+            if is_immediate_exit(key) {
+                return Ok(ExitAction::Quit);
+            }
+
             if app.modal.is_some() {
                 if matches!(key.code, KeyCode::Enter) {
                     app.dismiss_modal();
@@ -218,6 +222,11 @@ fn run_tui(app: &mut App) -> Result<ExitAction> {
             }
         }
     }
+}
+
+fn is_immediate_exit(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
 }
 
 fn prompt_for_confirmation() -> Result<bool> {
@@ -365,9 +374,10 @@ fn restore_terminal() {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use git_broom::app::{Branch, CleanupMode, Decision, Tranche};
 
-    use super::{OutputMode, fit_for_column, format_dry_run_lines, parse_cli};
+    use super::{OutputMode, fit_for_column, format_dry_run_lines, is_immediate_exit, parse_cli};
 
     fn sample_branch(name: &str) -> Branch {
         Branch {
@@ -430,5 +440,21 @@ mod tests {
             "unpushed (no upstream tracking branch is configured)"
         );
         assert!(lines[4].contains("feature/local-only"));
+    }
+
+    #[test]
+    fn ctrl_c_and_ctrl_d_exit_immediately() {
+        assert!(is_immediate_exit(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_immediate_exit(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(!is_immediate_exit(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        )));
     }
 }
