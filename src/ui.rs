@@ -32,7 +32,19 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     let items = app
         .branches
         .iter()
-        .map(|branch| render_branch(app, branch, content[1].width.saturating_sub(3) as usize))
+        .enumerate()
+        .map(|(index, branch)| {
+            let previous_section = index
+                .checked_sub(1)
+                .and_then(|previous| app.branches.get(previous))
+                .map(Branch::section);
+            render_branch(
+                app,
+                branch,
+                previous_section,
+                content[1].width.saturating_sub(3) as usize,
+            )
+        })
         .collect::<Vec<_>>();
 
     let list = List::new(items)
@@ -56,10 +68,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         desc_hint(" (up / down)  "),
         key_hint("d"),
         desc_hint(" (delete)  "),
+        key_hint("s"),
+        desc_hint(" (save)  "),
         key_hint("a"),
         desc_hint(" (delete all)  "),
         key_hint("u"),
-        desc_hint(" (clear)  "),
+        desc_hint(" (clear deletions)  "),
         key_hint("q"),
         desc_hint(" (quit)"),
     ]));
@@ -154,7 +168,12 @@ fn right_aligned_header(label: &'static str, width: usize) -> Vec<Span<'static>>
     ]
 }
 
-fn render_branch(app: &App, branch: &Branch, width: usize) -> ListItem<'static> {
+fn render_branch(
+    app: &App,
+    branch: &Branch,
+    previous_section: Option<crate::app::BranchSection>,
+    width: usize,
+) -> ListItem<'static> {
     let marker = match branch.decision {
         Decision::Delete => ("✗", Style::default().fg(Color::Red)),
         Decision::Undecided => ("·", Style::default().fg(Color::DarkGray)),
@@ -168,16 +187,25 @@ fn render_branch(app: &App, branch: &Branch, width: usize) -> ListItem<'static> 
     }
     if branch.is_protected() {
         line_style = line_style.fg(Color::DarkGray);
+    } else if branch.saved {
+        line_style = line_style.fg(Color::Green);
     }
     let secondary_value = secondary_column_value(branch, app.mode);
     let secondary_style = match app.mode {
+        CleanupMode::Closed if branch.is_protected() => line_style.fg(Color::DarkGray),
+        CleanupMode::Closed if branch.saved => line_style.fg(Color::Green),
         CleanupMode::Closed => line_style.fg(Color::Cyan),
         _ => line_style
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),
     };
 
-    let primary = Line::from(vec![
+    let mut lines = Vec::new();
+    if previous_section.is_some() && previous_section != Some(branch.section()) {
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(vec![
         Span::styled(format!("{} ", marker.0), marker.1),
         Span::styled(pad(&branch.display_name(), branch_width), line_style),
         Span::raw("  "),
@@ -190,23 +218,20 @@ fn render_branch(app: &App, branch: &Branch, width: usize) -> ListItem<'static> 
         ),
         Span::raw("  "),
         Span::styled(left_pad(&branch.relative_date, age_width), line_style),
-    ]);
+    ]));
 
     if let Some(detail) = &branch.detail {
         let detail_width = width.saturating_sub(5);
         let detail_style = line_style
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC);
-        return ListItem::new(vec![
-            primary,
-            Line::from(vec![
-                Span::raw("     "),
-                Span::styled(truncate(detail, detail_width), detail_style),
-            ]),
-        ]);
+        lines.push(Line::from(vec![
+            Span::raw("     "),
+            Span::styled(truncate(detail, detail_width), detail_style),
+        ]));
     }
 
-    ListItem::new(vec![primary])
+    ListItem::new(lines)
 }
 
 fn secondary_column_label(mode: CleanupMode) -> &'static str {

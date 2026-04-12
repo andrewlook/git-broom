@@ -15,6 +15,7 @@ use git_broom::app::{
     App, Branch, CleanupGroup, CleanupMode, DeleteResult, IMPLEMENTED_MODES, ScanProgress,
     delete_branches, scan_selected_modes, scan_selected_modes_with_progress,
 };
+use git_broom::keep_store::KeepStore;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -139,6 +140,7 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
                 return Ok(());
             }
             ExitAction::Confirm => {
+                persist_saved_branches(repo, &app)?;
                 let branches_to_delete = app.delete_candidates();
 
                 if branches_to_delete.is_empty() {
@@ -225,6 +227,7 @@ fn run_tui(app: &mut App) -> Result<ExitAction> {
                 KeyCode::Char('j') | KeyCode::Down => app.next(),
                 KeyCode::Char('k') | KeyCode::Up => app.previous(),
                 KeyCode::Char('d') => app.toggle_delete(),
+                KeyCode::Char('s') => app.toggle_save(),
                 KeyCode::Char('a') => app.mark_all_delete(),
                 KeyCode::Char('u') => app.unmark_all(),
                 KeyCode::Enter => return Ok(ExitAction::Confirm),
@@ -238,6 +241,11 @@ fn run_tui(app: &mut App) -> Result<ExitAction> {
 fn is_immediate_exit(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+}
+
+fn persist_saved_branches(repo: &Path, app: &App) -> Result<()> {
+    let mut keep_store = KeepStore::load(repo)?;
+    keep_store.replace_mode(app.mode, app.saved_branch_names())
 }
 
 fn prompt_for_confirmation() -> Result<bool> {
@@ -308,9 +316,20 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
             secondary_width,
             age_width,
         ));
-        lines.extend(group.branches.iter().flat_map(|branch| {
-            format_preview_branch(group.mode, branch, branch_width, secondary_width, age_width)
-        }));
+        let mut previous_section = None;
+        for branch in &group.branches {
+            if previous_section.is_some() && previous_section != Some(branch.section()) {
+                lines.push(String::new());
+            }
+            lines.extend(format_preview_branch(
+                group.mode,
+                branch,
+                branch_width,
+                secondary_width,
+                age_width,
+            ));
+            previous_section = Some(branch.section());
+        }
     }
 
     if lines.is_empty() {
@@ -517,6 +536,8 @@ How it works:
   - --dry-run and --batch print a readable preview of the same grouped flow
     without deleting anything.
   - Protected branches stay visible for context but cannot be deleted.
+  - Press s in the TUI to save or unsave a branch for this repo and mode.
+    Saved branches stay visible but are excluded from delete-all until unsaved.
 
 Options:
   --dry-run        Show the grouped preview without deleting anything.
@@ -659,6 +680,7 @@ mod tests {
             subject: "subject line".to_string(),
             pr_url: None,
             detail: None,
+            saved: false,
             decision: Decision::Undecided,
             protections: Vec::new(),
         }
@@ -745,6 +767,37 @@ mod tests {
         assert!(lines[6].contains("branch name"));
         assert!(lines[7].contains("-----------"));
         assert!(lines[8].contains("feature/local-only"));
+    }
+
+    #[test]
+    fn format_preview_lines_separates_saved_rows() {
+        let mut protected = sample_branch("feature/current");
+        protected.protections = vec![git_broom::app::Protection::Current];
+
+        let mut saved = sample_branch("feature/saved");
+        saved.saved = true;
+
+        let regular = sample_branch("feature/regular");
+
+        let lines = format_preview_lines(
+            &[CleanupGroup::from_mode(
+                CleanupMode::Gone,
+                vec![protected, saved, regular],
+            )],
+            120,
+        );
+
+        let saved_index = lines
+            .iter()
+            .position(|line| line.contains("feature/saved"))
+            .expect("saved branch rendered");
+        let regular_index = lines
+            .iter()
+            .position(|line| line.contains("feature/regular"))
+            .expect("regular branch rendered");
+
+        assert_eq!(lines[saved_index - 1], "");
+        assert_eq!(lines[regular_index - 1], "");
     }
 
     #[test]

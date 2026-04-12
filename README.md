@@ -10,6 +10,7 @@ Current behavior focuses on three cleanup modes:
 - interactive mode walks the selected groups one by one
 - `--batch` prints the same readable deletion preview without entering the TUI
 - `--dry-run` prints grouped previews without deleting anything
+- `s` in interactive mode saves or unsaves a branch for this repo and cleanup mode
 
 ## Requirements
 
@@ -40,6 +41,16 @@ cargo run -- gone --batch
 ```
 
 `closed` mode can expand into more than one review group, for example a `closed` group for closed/no-PR branches and a `merged` group for merged PRs whose remote branch still exists.
+
+Saved branches are cached locally under the repo's git metadata directory, not in tracked files. In a normal clone that path is `.git/git-broom/keep-labels.json`; in worktree setups it resolves through the shared git common dir.
+
+Within each review group, branches are shown in this order:
+
+- protected branches first
+- saved branches next
+- regular cleanup candidates last
+
+Saved branches stay visible in both the TUI and preview output, but `delete all` skips them until you unsave them.
 
 ## Install from source
 

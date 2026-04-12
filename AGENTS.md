@@ -27,11 +27,13 @@ Current learnings:
 - Keep destructive flows step-based when there are multiple cleanup modes. Review one group at a time and confirm per group.
 - Keep protected branches visible in previews and interactive review. Label them inline instead of silently filtering them out.
 - When a protected branch is selected for deletion, explain why it is ineligible instead of ignoring the action.
+- Persistent saved/keep labels live under the git common dir at `git-broom/keep-labels.json`, not in tracked files.
 - Preserve parity between interactive and non-interactive modes:
   - same group order
   - same mode/explainer text
   - same branch visibility rules
   - similar row structure where practical
+  - same protected / saved / regular ordering
 
 ## Working Conventions
 

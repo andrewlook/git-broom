@@ -6,6 +6,7 @@ use std::process::Command;
 use git_broom::app::{
     Branch, CleanupMode, Decision, Protection, delete_branches, scan_selected_modes,
 };
+use git_broom::keep_store::KeepStore;
 use tempfile::TempDir;
 
 #[test]
@@ -229,6 +230,47 @@ fn closed_mode_excludes_merged_branches_whose_remote_is_already_gone() {
 }
 
 #[test]
+fn saved_labels_persist_under_git_common_dir_and_reload_on_next_scan() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/keep");
+    repo.create_unpushed_branch("feature/regular");
+
+    let mut keep_store = KeepStore::load(repo.local_path()).expect("keep store loads");
+    keep_store
+        .replace_mode(CleanupMode::Unpushed, [String::from("feature/keep")])
+        .expect("keep store persists");
+
+    let store_path = repo.keep_store_path();
+    assert!(store_path.exists());
+    assert!(store_path.ends_with(Path::new(".git/git-broom/keep-labels.json")));
+
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Unpushed], "origin")
+        .expect("scan succeeds");
+    let group = find_group(&groups, CleanupMode::Unpushed);
+
+    assert_eq!(group.branches[0].name, "feature/keep");
+    assert!(group.branches[0].saved);
+    assert_eq!(group.branches[1].name, "feature/regular");
+    assert!(!group.branches[1].saved);
+}
+
+#[test]
+fn malformed_keep_store_aborts_scan_with_store_path() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/keep");
+    let store_path = repo.keep_store_path();
+    fs::create_dir_all(store_path.parent().expect("keep store parent")).expect("store dir created");
+    fs::write(&store_path, "{not valid json").expect("broken store written");
+
+    let error =
+        scan_selected_modes(repo.local_path(), &[CleanupMode::Unpushed], "origin").unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("failed to parse keep-label store"));
+    assert!(message.contains(store_path.to_str().expect("utf8 store path")));
+}
+
+#[test]
 fn delete_closed_branch_removes_remote_then_local() {
     let repo = TestRepo::new();
     repo.create_remote_tracked_branch("feature/closed", "origin");
@@ -346,6 +388,14 @@ impl TestRepo {
 
     fn temp_path(&self, name: &str) -> PathBuf {
         self._root.path().join(name)
+    }
+
+    fn keep_store_path(&self) -> PathBuf {
+        PathBuf::from(
+            self.git_local_stdout(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+                .trim(),
+        )
+        .join("git-broom/keep-labels.json")
     }
 
     fn install_fake_gh(&self, pr_list_json: &str) -> PathBuf {
@@ -509,6 +559,7 @@ fn tracked_branch(name: &str, remote: &str) -> Branch {
         subject: String::from("subject"),
         pr_url: None,
         detail: None,
+        saved: false,
         protections: Vec::new(),
         decision: Decision::Delete,
     }

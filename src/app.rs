@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
+use crate::keep_store::KeepStore;
+
 const FIELD_SEPARATOR: char = '\u{1f}';
 
 pub const IMPLEMENTED_MODES: [CleanupMode; 3] = [
@@ -70,6 +72,13 @@ pub enum Decision {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BranchSection {
+    Protected,
+    Saved,
+    Regular,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protection {
     Current,
@@ -113,6 +122,7 @@ pub struct Branch {
     pub subject: String,
     pub pr_url: Option<String>,
     pub detail: Option<String>,
+    pub saved: bool,
     pub protections: Vec<Protection>,
     pub decision: Decision,
 }
@@ -123,22 +133,34 @@ impl Branch {
     }
 
     pub fn is_deletable(&self) -> bool {
-        !self.is_protected()
+        self.section() == BranchSection::Regular
+    }
+
+    pub fn section(&self) -> BranchSection {
+        if self.is_protected() {
+            BranchSection::Protected
+        } else if self.saved {
+            BranchSection::Saved
+        } else {
+            BranchSection::Regular
+        }
     }
 
     pub fn display_name(&self) -> String {
-        if self.protections.is_empty() {
-            return self.name.clone();
-        }
-
-        let labels = self
+        let mut labels = self
             .protections
             .iter()
             .map(|protection| format!("({})", protection.label()))
-            .collect::<Vec<_>>()
-            .join(" ");
+            .collect::<Vec<_>>();
+        if self.saved {
+            labels.push(String::from("(saved)"));
+        }
 
-        format!("{} {}", self.name, labels)
+        if labels.is_empty() {
+            return self.name.clone();
+        }
+
+        format!("{} {}", self.name, labels.join(" "))
     }
 
     pub fn upstream_remote(&self) -> Option<&str> {
@@ -210,6 +232,7 @@ pub struct Modal {
 
 impl App {
     pub fn from_group(group: CleanupGroup, step_index: usize, step_count: usize) -> Self {
+        let selected = initial_selection(&group.branches);
         Self {
             mode: group.mode,
             group_name: group.name,
@@ -217,7 +240,7 @@ impl App {
             step_index,
             step_count,
             branches: group.branches,
-            selected: 0,
+            selected,
             modal: None,
         }
     }
@@ -261,11 +284,47 @@ impl App {
             });
             return;
         }
+        if branch.saved {
+            self.modal = Some(Modal {
+                title: "Branch Saved",
+                message: String::from(
+                    "Saved branches must be unsaved before deletion. Press s to remove the saved label, then press Enter to return to branch triage.",
+                ),
+            });
+            return;
+        }
 
         branch.decision = match branch.decision {
             Decision::Undecided => Decision::Delete,
             Decision::Delete => Decision::Undecided,
         };
+    }
+
+    pub fn toggle_save(&mut self) {
+        let Some(selected_name) = self
+            .branches
+            .get(self.selected)
+            .map(|branch| branch.name.clone())
+        else {
+            return;
+        };
+        let Some(branch) = self.branches.get_mut(self.selected) else {
+            return;
+        };
+
+        branch.saved = !branch.saved;
+        branch.decision = Decision::Undecided;
+
+        reorder_branches(&mut self.branches);
+        if let Some(index) = self
+            .branches
+            .iter()
+            .position(|branch| branch.name == selected_name)
+        {
+            self.selected = index;
+        } else {
+            self.selected = initial_selection(&self.branches);
+        }
     }
 
     pub fn mark_all_delete(&mut self) {
@@ -300,6 +359,14 @@ impl App {
 
     pub fn delete_count(&self) -> usize {
         self.delete_candidates().len()
+    }
+
+    pub fn saved_branch_names(&self) -> Vec<String> {
+        self.branches
+            .iter()
+            .filter(|branch| branch.saved)
+            .map(|branch| branch.name.clone())
+            .collect()
     }
 
     pub fn dismiss_modal(&mut self) {
@@ -399,6 +466,7 @@ where
 {
     progress(ScanProgress::ValidatingRepository, None);
     ensure_work_tree(repo)?;
+    let keep_store = KeepStore::load(repo)?;
 
     progress(ScanProgress::ReadingCurrentBranch, None);
     let current_branch = current_branch(repo)?;
@@ -429,21 +497,31 @@ where
     let mut groups = Vec::new();
     for mode in modes.iter().copied() {
         match mode {
-            CleanupMode::Closed => groups.extend(build_closed_groups(
-                &all_branches,
-                closed_mode_data
-                    .as_ref()
-                    .expect("closed mode data loaded when mode selected"),
-                remote,
-                &mut progress,
-            )),
+            CleanupMode::Closed => groups.extend(
+                build_closed_groups(
+                    &all_branches,
+                    closed_mode_data
+                        .as_ref()
+                        .expect("closed mode data loaded when mode selected"),
+                    remote,
+                    &mut progress,
+                )
+                .into_iter()
+                .map(|mut group| {
+                    group.branches = apply_keep_labels(group.mode, group.branches, &keep_store);
+                    group
+                }),
+            ),
             _ => {
                 let branches = all_branches
                     .iter()
                     .filter(|branch| mode.matches(branch))
                     .cloned()
                     .collect::<Vec<_>>();
-                groups.push(CleanupGroup::from_mode(mode, branches));
+                groups.push(CleanupGroup::from_mode(
+                    mode,
+                    apply_keep_labels(mode, branches, &keep_store),
+                ));
             }
         }
     }
@@ -627,6 +705,41 @@ where
     ]
 }
 
+fn apply_keep_labels(
+    mode: CleanupMode,
+    mut branches: Vec<Branch>,
+    keep_store: &KeepStore,
+) -> Vec<Branch> {
+    for branch in &mut branches {
+        branch.saved = keep_store.is_saved(mode, &branch.name);
+        branch.decision = Decision::Undecided;
+    }
+
+    reorder_branches(&mut branches);
+    branches
+}
+
+fn reorder_branches(branches: &mut [Branch]) {
+    branches.sort_by_key(|branch| branch.section());
+}
+
+fn initial_selection(branches: &[Branch]) -> usize {
+    branches
+        .iter()
+        .position(|branch| branch.section() == BranchSection::Regular)
+        .or_else(|| {
+            branches
+                .iter()
+                .position(|branch| branch.section() == BranchSection::Saved)
+        })
+        .or_else(|| {
+            branches
+                .iter()
+                .position(|branch| branch.section() == BranchSection::Protected)
+        })
+        .unwrap_or(0)
+}
+
 fn load_closed_mode_data<F>(
     repo: &Path,
     remote: &str,
@@ -799,6 +912,7 @@ fn parse_branch_line(
         subject,
         pr_url: None,
         detail: None,
+        saved: false,
         protections,
         decision: Decision::Undecided,
     })
@@ -1010,8 +1124,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        App, Branch, CleanupGroup, CleanupMode, Decision, FIELD_SEPARATOR, Protection,
-        chunk_summary, closed_candidate_heads, format_age_from_seconds, parse_branch_line,
+        App, Branch, BranchSection, CleanupGroup, CleanupMode, Decision, FIELD_SEPARATOR,
+        Protection, chunk_summary, closed_candidate_heads, format_age_from_seconds,
+        parse_branch_line,
     };
 
     const SAMPLE_TIMESTAMP: &str = "1700000000";
@@ -1152,6 +1267,114 @@ mod tests {
     }
 
     #[test]
+    fn toggle_delete_shows_modal_for_saved_branch() {
+        let mut branch = parse_branch_line(
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        branch.saved = true;
+        let mut app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
+            1,
+            1,
+        );
+
+        app.toggle_delete();
+
+        let modal = app.modal.expect("modal shown");
+        assert_eq!(modal.title, "Branch Saved");
+        assert!(modal.message.contains("must be unsaved before deletion"));
+        assert_eq!(app.branches[0].decision, Decision::Undecided);
+    }
+
+    #[test]
+    fn from_group_starts_selection_at_first_regular_branch() {
+        let mut protected = parse_branch_line(
+            &format!(
+                "feature/protected{FIELD_SEPARATOR}origin/feature/protected{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            Some("feature/protected"),
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        protected.saved = true;
+
+        let mut saved = parse_branch_line(
+            &format!(
+                "feature/saved{FIELD_SEPARATOR}origin/feature/saved{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        saved.saved = true;
+
+        let regular = parse_branch_line(
+            &format!(
+                "feature/regular{FIELD_SEPARATOR}origin/feature/regular{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+
+        let app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![protected, saved, regular]),
+            1,
+            1,
+        );
+
+        assert_eq!(app.selected, 2);
+        assert_eq!(app.branches[app.selected].section(), BranchSection::Regular);
+    }
+
+    #[test]
+    fn toggle_save_moves_branch_into_saved_section() {
+        let first = parse_branch_line(
+            &format!(
+                "feature/first{FIELD_SEPARATOR}origin/feature/first{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        let second = parse_branch_line(
+            &format!(
+                "feature/second{FIELD_SEPARATOR}origin/feature/second{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        let mut app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![first, second]),
+            1,
+            1,
+        );
+
+        app.selected = 1;
+        app.toggle_save();
+
+        assert_eq!(app.branches[0].name, "feature/second");
+        assert!(app.branches[0].saved);
+        assert_eq!(app.selected, 0);
+        assert_eq!(
+            app.saved_branch_names(),
+            vec![String::from("feature/second")]
+        );
+    }
+
+    #[test]
     fn format_age_uses_months_for_long_durations() {
         assert_eq!(
             format_age_from_seconds(18 * 30 * 24 * 60 * 60),
@@ -1171,6 +1394,7 @@ mod tests {
                 subject: String::from("first"),
                 pr_url: None,
                 detail: None,
+                saved: false,
                 protections: Vec::new(),
                 decision: Decision::Undecided,
             },
@@ -1183,6 +1407,7 @@ mod tests {
                 subject: String::from("second"),
                 pr_url: None,
                 detail: None,
+                saved: false,
                 protections: Vec::new(),
                 decision: Decision::Undecided,
             },
@@ -1195,6 +1420,7 @@ mod tests {
                 subject: String::from("main"),
                 pr_url: None,
                 detail: None,
+                saved: false,
                 protections: vec![Protection::Main],
                 decision: Decision::Undecided,
             },
@@ -1207,6 +1433,7 @@ mod tests {
                 subject: String::from("gone"),
                 pr_url: None,
                 detail: None,
+                saved: false,
                 protections: Vec::new(),
                 decision: Decision::Undecided,
             },
