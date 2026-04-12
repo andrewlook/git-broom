@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, Branch, Decision};
+use crate::app::{App, Branch, CleanupMode, Decision};
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let chunks = Layout::default()
@@ -25,14 +25,14 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(inner);
 
-    let header = Paragraph::new(render_header(content[0].width as usize))
+    let header = Paragraph::new(render_header(app, content[0].width as usize))
         .style(Style::default().add_modifier(Modifier::BOLD));
     frame.render_widget(header, content[0]);
 
     let items = app
         .branches
         .iter()
-        .map(|branch| render_branch(branch, content[1].width.saturating_sub(3) as usize))
+        .map(|branch| render_branch(app, branch, content[1].width.saturating_sub(3) as usize))
         .collect::<Vec<_>>();
 
     let list = List::new(items)
@@ -83,10 +83,11 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
-fn render_header(width: usize) -> Line<'static> {
+fn render_header(app: &App, width: usize) -> Line<'static> {
     let row_prefix_width = 5;
-    let (branch_width, commit_width, age_width) =
-        column_widths(width.saturating_sub(row_prefix_width));
+    let (branch_width, secondary_width, age_width) =
+        column_widths(app.mode, width.saturating_sub(row_prefix_width));
+    let secondary_label = secondary_column_label(app.mode);
     let mut spans = vec![
         Span::raw(" ".repeat(row_prefix_width)),
         Span::styled(
@@ -98,7 +99,7 @@ fn render_header(width: usize) -> Line<'static> {
         Span::raw(" ".repeat(branch_width.saturating_sub("branch name".chars().count()))),
         Span::raw("  "),
     ];
-    spans.extend(right_aligned_header("last commit", commit_width));
+    spans.extend(right_aligned_header(secondary_label, secondary_width));
     spans.push(Span::raw("  "));
     spans.extend(right_aligned_header("age", age_width));
 
@@ -153,12 +154,13 @@ fn right_aligned_header(label: &'static str, width: usize) -> Vec<Span<'static>>
     ]
 }
 
-fn render_branch(branch: &Branch, width: usize) -> ListItem<'static> {
+fn render_branch(app: &App, branch: &Branch, width: usize) -> ListItem<'static> {
     let marker = match branch.decision {
         Decision::Delete => ("✗", Style::default().fg(Color::Red)),
         Decision::Undecided => ("·", Style::default().fg(Color::DarkGray)),
     };
-    let (branch_width, commit_width, age_width) = column_widths(width.saturating_sub(6));
+    let (branch_width, secondary_width, age_width) =
+        column_widths(app.mode, width.saturating_sub(6));
 
     let mut line_style = Style::default();
     if branch.decision == Decision::Delete {
@@ -167,6 +169,13 @@ fn render_branch(branch: &Branch, width: usize) -> ListItem<'static> {
     if branch.is_protected() {
         line_style = line_style.fg(Color::DarkGray);
     }
+    let secondary_value = secondary_column_value(branch, app.mode);
+    let secondary_style = match app.mode {
+        CleanupMode::Closed => line_style.fg(Color::Cyan),
+        _ => line_style
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    };
 
     let primary = Line::from(vec![
         Span::styled(format!("{} ", marker.0), marker.1),
@@ -174,12 +183,10 @@ fn render_branch(branch: &Branch, width: usize) -> ListItem<'static> {
         Span::raw("  "),
         Span::styled(
             left_pad(
-                &format!("\"{}\"", truncate(&branch.subject, commit_width)),
-                commit_width,
+                &truncate(&secondary_value, secondary_width),
+                secondary_width,
             ),
-            line_style
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
+            secondary_style,
         ),
         Span::raw("  "),
         Span::styled(left_pad(&branch.relative_date, age_width), line_style),
@@ -202,11 +209,41 @@ fn render_branch(branch: &Branch, width: usize) -> ListItem<'static> {
     ListItem::new(vec![primary])
 }
 
-fn column_widths(width: usize) -> (usize, usize, usize) {
-    let age_width = 14;
-    let commit_width = 28.min(width.saturating_sub(age_width + 6));
-    let branch_width = width.saturating_sub(commit_width + age_width + 4);
-    (branch_width.max(12), commit_width.max(12), age_width)
+fn secondary_column_label(mode: CleanupMode) -> &'static str {
+    match mode {
+        CleanupMode::Closed => "pull request",
+        _ => "last commit",
+    }
+}
+
+fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
+    match mode {
+        CleanupMode::Closed => branch
+            .pr_url
+            .clone()
+            .unwrap_or_else(|| String::from("no PR")),
+        _ => format!("\"{}\"", branch.subject),
+    }
+}
+
+fn column_widths(mode: CleanupMode, width: usize) -> (usize, usize, usize) {
+    let min_branch = 12;
+    let min_secondary = 12;
+    let max_age = 14;
+    let age_width = width
+        .saturating_sub(min_branch + min_secondary + 4)
+        .min(max_age);
+    let remaining = width.saturating_sub(age_width + 4);
+    let preferred_branch = match mode {
+        CleanupMode::Closed => remaining / 3,
+        _ => remaining * 2 / 5,
+    };
+    let branch_width = preferred_branch
+        .max(min_branch)
+        .min(remaining.saturating_sub(min_secondary));
+    let secondary_width = remaining.saturating_sub(branch_width).max(min_secondary);
+
+    (branch_width, secondary_width, age_width)
 }
 
 fn pad(value: &str, width: usize) -> String {

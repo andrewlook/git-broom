@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
 };
 use git_broom::app::{
     App, Branch, CleanupGroup, CleanupMode, DeleteResult, IMPLEMENTED_MODES, ScanProgress,
@@ -176,7 +176,7 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
 }
 
 fn run_batch(groups: &[CleanupGroup]) -> Result<()> {
-    for line in format_preview_lines(groups) {
+    for line in format_preview_lines(groups, preview_width()) {
         println!("{line}");
     }
 
@@ -184,7 +184,7 @@ fn run_batch(groups: &[CleanupGroup]) -> Result<()> {
 }
 
 fn run_dry_run(groups: &[CleanupGroup]) -> Result<()> {
-    for line in format_preview_lines(groups) {
+    for line in format_preview_lines(groups, preview_width()) {
         println!("{line}");
     }
 
@@ -268,10 +268,8 @@ fn print_delete_results(group_name: &str, results: &[DeleteResult]) -> (usize, u
     (deleted, failed)
 }
 
-fn format_preview_lines(groups: &[CleanupGroup]) -> Vec<String> {
+fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<String> {
     let mut lines = Vec::new();
-    let (branch_width, commit_width, age_width) = preview_column_widths();
-    let total_width = preview_total_width(branch_width, commit_width, age_width);
     let step_count = groups
         .iter()
         .filter(|group| !group.branches.is_empty())
@@ -288,6 +286,9 @@ fn format_preview_lines(groups: &[CleanupGroup]) -> Vec<String> {
         }
 
         step_index += 1;
+        let (branch_width, secondary_width, age_width) =
+            preview_column_widths(group.mode, available_width);
+        let total_width = preview_total_width(branch_width, secondary_width, age_width);
         lines.push(format_preview_title(
             &group.name,
             &group.description,
@@ -295,10 +296,20 @@ fn format_preview_lines(groups: &[CleanupGroup]) -> Vec<String> {
             step_count,
             total_width,
         ));
-        lines.push(format_preview_header(branch_width, commit_width, age_width));
-        lines.push(format_preview_rule(branch_width, commit_width, age_width));
+        lines.push(format_preview_header(
+            group.mode,
+            branch_width,
+            secondary_width,
+            age_width,
+        ));
+        lines.push(format_preview_rule(
+            group.mode,
+            branch_width,
+            secondary_width,
+            age_width,
+        ));
         lines.extend(group.branches.iter().flat_map(|branch| {
-            format_preview_branch(branch, branch_width, commit_width, age_width)
+            format_preview_branch(group.mode, branch, branch_width, secondary_width, age_width)
         }));
     }
 
@@ -325,16 +336,28 @@ fn format_preview_title(
     format!("{left}{}{right}", " ".repeat(spacer_width.max(1)))
 }
 
-fn format_preview_header(branch_width: usize, commit_width: usize, age_width: usize) -> String {
+fn format_preview_header(
+    mode: CleanupMode,
+    branch_width: usize,
+    secondary_width: usize,
+    age_width: usize,
+) -> String {
+    let secondary_label = secondary_column_label(mode);
     format!(
         "  {}  {}  {}",
         pad("branch name", branch_width),
-        left_pad("last commit", commit_width),
+        left_pad(secondary_label, secondary_width),
         left_pad("age", age_width),
     )
 }
 
-fn format_preview_rule(branch_width: usize, commit_width: usize, age_width: usize) -> String {
+fn format_preview_rule(
+    mode: CleanupMode,
+    branch_width: usize,
+    secondary_width: usize,
+    age_width: usize,
+) -> String {
+    let secondary_label = secondary_column_label(mode);
     format!(
         "  {}  {}  {}",
         pad(
@@ -342,25 +365,27 @@ fn format_preview_rule(branch_width: usize, commit_width: usize, age_width: usiz
             branch_width
         ),
         left_pad(
-            "-".repeat("last commit".chars().count()).as_str(),
-            commit_width
+            "-".repeat(secondary_label.chars().count()).as_str(),
+            secondary_width
         ),
         left_pad("-".repeat("age".chars().count()).as_str(), age_width),
     )
 }
 
 fn format_preview_branch(
+    mode: CleanupMode,
     branch: &Branch,
     branch_width: usize,
-    commit_width: usize,
+    secondary_width: usize,
     age_width: usize,
 ) -> Vec<String> {
+    let secondary_value = secondary_column_value(branch, mode);
     let mut lines = vec![format!(
         "  {}  {}  {}",
         pad(&branch.display_name(), branch_width),
         left_pad(
-            &format!("\"{}\"", truncate(&branch.subject, commit_width)),
-            commit_width,
+            &truncate(&secondary_value, secondary_width),
+            secondary_width
         ),
         left_pad(&branch.relative_date, age_width),
     )];
@@ -370,7 +395,7 @@ fn format_preview_branch(
             "     {}",
             truncate(
                 detail,
-                preview_total_width(branch_width, commit_width, age_width) - 5
+                preview_total_width(branch_width, secondary_width, age_width) - 5
             )
         ));
     }
@@ -378,12 +403,21 @@ fn format_preview_branch(
     lines
 }
 
-fn preview_column_widths() -> (usize, usize, usize) {
-    (38, 28, 14)
+fn preview_column_widths(mode: CleanupMode, available_width: usize) -> (usize, usize, usize) {
+    let content_width = available_width.saturating_sub(2).max(40);
+    column_widths(mode, content_width.saturating_sub(2))
 }
 
 fn preview_total_width(branch_width: usize, commit_width: usize, age_width: usize) -> usize {
     2 + branch_width + 2 + commit_width + 2 + age_width
+}
+
+fn preview_width() -> usize {
+    if io::stdout().is_terminal() {
+        size().map(|(width, _)| width as usize).unwrap_or(80)
+    } else {
+        80
+    }
 }
 
 fn fit_for_column(value: &str, width: usize) -> String {
@@ -423,6 +457,43 @@ fn left_pad(value: &str, width: usize) -> String {
     }
 
     format!("{}{}", " ".repeat(width - visible), truncated)
+}
+
+fn secondary_column_label(mode: CleanupMode) -> &'static str {
+    match mode {
+        CleanupMode::Closed => "pull request",
+        _ => "last commit",
+    }
+}
+
+fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
+    match mode {
+        CleanupMode::Closed => branch
+            .pr_url
+            .clone()
+            .unwrap_or_else(|| String::from("no PR")),
+        _ => format!("\"{}\"", branch.subject),
+    }
+}
+
+fn column_widths(mode: CleanupMode, width: usize) -> (usize, usize, usize) {
+    let min_branch = 12;
+    let min_secondary = 12;
+    let max_age = 14;
+    let age_width = width
+        .saturating_sub(min_branch + min_secondary + 4)
+        .min(max_age);
+    let remaining = width.saturating_sub(age_width + 4);
+    let preferred_branch = match mode {
+        CleanupMode::Closed => remaining / 3,
+        _ => remaining * 2 / 5,
+    };
+    let branch_width = preferred_branch
+        .max(min_branch)
+        .min(remaining.saturating_sub(min_secondary));
+    let secondary_width = remaining.saturating_sub(branch_width).max(min_secondary);
+
+    (branch_width, secondary_width, age_width)
 }
 
 fn usage_text() -> &'static str {
@@ -491,12 +562,18 @@ impl ScanStatusLine {
         let detail_suffix = detail
             .map(|value| format!(": {}", fit_for_column(value, 36)))
             .unwrap_or_default();
+        let trailing = if detail_suffix.ends_with("...") {
+            ""
+        } else {
+            "..."
+        };
         eprint!(
-            "\r\x1b[2Kgit-broom: [{}/{}] {}{}...",
+            "\r\x1b[2Kgit-broom: [{}/{}] {}{}{}",
             stage.step(),
             ScanProgress::TOTAL_STEPS,
             stage.message(),
-            detail_suffix
+            detail_suffix,
+            trailing
         );
         let _ = io::stderr().flush();
     }
@@ -580,6 +657,7 @@ mod tests {
             committed_at: 1_700_000_000,
             relative_date: "2 days ago".to_string(),
             subject: "subject line".to_string(),
+            pr_url: None,
             detail: None,
             decision: Decision::Undecided,
             protections: Vec::new(),
@@ -640,13 +718,19 @@ mod tests {
 
     #[test]
     fn format_preview_lines_groups_branches_by_mode() {
-        let lines = format_preview_lines(&[
-            CleanupGroup::from_mode(CleanupMode::Gone, vec![sample_branch("feature/delete-me")]),
-            CleanupGroup::from_mode(
-                CleanupMode::Unpushed,
-                vec![sample_branch("feature/local-only")],
-            ),
-        ]);
+        let lines = format_preview_lines(
+            &[
+                CleanupGroup::from_mode(
+                    CleanupMode::Gone,
+                    vec![sample_branch("feature/delete-me")],
+                ),
+                CleanupGroup::from_mode(
+                    CleanupMode::Unpushed,
+                    vec![sample_branch("feature/local-only")],
+                ),
+            ],
+            80,
+        );
 
         assert!(lines[0].starts_with("  git-broom   [gone: upstream branch no longer exists]"));
         assert!(lines[0].ends_with("(1/2)"));
@@ -661,6 +745,25 @@ mod tests {
         assert!(lines[6].contains("branch name"));
         assert!(lines[7].contains("-----------"));
         assert!(lines[8].contains("feature/local-only"));
+    }
+
+    #[test]
+    fn format_preview_lines_uses_pull_request_column_for_closed_mode() {
+        let mut branch = sample_branch("feature/closed");
+        branch.pr_url = Some(String::from("https://example.test/pr/1"));
+
+        let lines = format_preview_lines(
+            &[CleanupGroup::named(
+                CleanupMode::Closed,
+                "closed",
+                "closed pull request or no pull request on GitHub",
+                vec![branch],
+            )],
+            120,
+        );
+
+        assert!(lines[1].contains("pull request"));
+        assert!(lines[3].contains("https://example.test/pr/1"));
     }
 
     #[test]

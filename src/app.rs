@@ -111,6 +111,7 @@ pub struct Branch {
     pub committed_at: i64,
     pub relative_date: String,
     pub subject: String,
+    pub pr_url: Option<String>,
     pub detail: Option<String>,
     pub protections: Vec<Protection>,
     pub decision: Decision,
@@ -326,7 +327,6 @@ struct RepoView {
 
 #[derive(Debug, Clone, Deserialize)]
 struct PullRequestRecord {
-    number: u64,
     state: String,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
@@ -344,8 +344,8 @@ pub enum ScanProgress {
     ValidatingRepository,
     ReadingCurrentBranch,
     ReadingWorktrees,
-    LoadingGithubData,
     LoadingLocalBranches,
+    LoadingGithubData,
     MatchingClosedBranches,
 }
 
@@ -357,8 +357,8 @@ impl ScanProgress {
             Self::ValidatingRepository => 1,
             Self::ReadingCurrentBranch => 2,
             Self::ReadingWorktrees => 3,
-            Self::LoadingGithubData => 4,
-            Self::LoadingLocalBranches => 5,
+            Self::LoadingLocalBranches => 4,
+            Self::LoadingGithubData => 5,
             Self::MatchingClosedBranches => 6,
         }
     }
@@ -368,8 +368,8 @@ impl ScanProgress {
             Self::ValidatingRepository => "validating repository",
             Self::ReadingCurrentBranch => "reading current branch",
             Self::ReadingWorktrees => "reading linked worktrees",
-            Self::LoadingGithubData => "loading GitHub data",
             Self::LoadingLocalBranches => "loading local branches",
+            Self::LoadingGithubData => "loading GitHub data",
             Self::MatchingClosedBranches => "matching branches against GitHub state",
         }
     }
@@ -401,23 +401,23 @@ where
     progress(ScanProgress::ReadingWorktrees, None);
     let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
 
+    progress(ScanProgress::LoadingLocalBranches, None);
+    let mut all_branches =
+        load_branch_inventory(repo, current_branch.as_deref(), None, &worktree_branches)?;
+
+    let closed_branch_summary = summarize_closed_candidates(&all_branches, remote);
+
     let closed_mode_data = if modes.contains(&CleanupMode::Closed) {
-        progress(ScanProgress::LoadingGithubData, None);
-        Some(load_closed_mode_data(repo, remote)?)
+        progress(
+            ScanProgress::LoadingGithubData,
+            closed_branch_summary.as_deref(),
+        );
+        let closed_mode_data = load_closed_mode_data(repo, remote)?;
+        apply_default_branch_protection(&mut all_branches, &closed_mode_data.default_branch);
+        Some(closed_mode_data)
     } else {
         None
     };
-    let default_branch = closed_mode_data
-        .as_ref()
-        .map(|data| data.default_branch.as_str());
-
-    progress(ScanProgress::LoadingLocalBranches, None);
-    let all_branches = load_branch_inventory(
-        repo,
-        current_branch.as_deref(),
-        default_branch,
-        &worktree_branches,
-    )?;
 
     let mut groups = Vec::new();
     for mode in modes.iter().copied() {
@@ -497,6 +497,51 @@ fn load_branch_inventory(
     Ok(branches)
 }
 
+fn apply_default_branch_protection(branches: &mut [Branch], default_branch: &str) {
+    if matches!(default_branch, "main" | "master") {
+        return;
+    }
+
+    for branch in branches {
+        if branch.name == default_branch && !branch.protections.contains(&Protection::DefaultBranch)
+        {
+            branch.protections.push(Protection::DefaultBranch);
+        }
+    }
+}
+
+fn summarize_closed_candidates(branches: &[Branch], remote: &str) -> Option<String> {
+    let candidate_names = branches
+        .iter()
+        .filter(|branch| {
+            branch.upstream_remote() == Some(remote)
+                && !branch
+                    .protections
+                    .iter()
+                    .any(|protection| matches!(protection, Protection::Main | Protection::Master))
+        })
+        .map(|branch| branch.name.as_str())
+        .collect::<Vec<_>>();
+
+    if candidate_names.is_empty() {
+        return None;
+    }
+
+    let preview = candidate_names
+        .iter()
+        .take(3)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = candidate_names.len().saturating_sub(3);
+
+    if remaining == 0 {
+        Some(preview)
+    } else {
+        Some(format!("{preview} (+{remaining} more)"))
+    }
+}
+
 fn build_closed_groups<F>(
     all_branches: &[Branch],
     closed_mode_data: &ClosedModeData,
@@ -536,15 +581,15 @@ where
         match closed_mode_data.pull_requests.get(head_ref_name) {
             Some(pr) if pr.state == "OPEN" => continue,
             Some(pr) if pr.state == "MERGED" => {
-                branch.detail = Some(format!("PR #{} · {}", pr.number, pr.url));
+                branch.pr_url = Some(pr.url.clone());
                 merged.push(branch);
             }
             Some(pr) if pr.state == "CLOSED" => {
-                branch.detail = Some(format!("PR #{} · {}", pr.number, pr.url));
+                branch.pr_url = Some(pr.url.clone());
                 closed.push(branch);
             }
             Some(pr) => {
-                branch.detail = Some(format!("PR #{} · {}", pr.number, pr.url));
+                branch.pr_url = Some(pr.url.clone());
                 closed.push(branch);
             }
             None => {
@@ -704,6 +749,7 @@ fn parse_branch_line(
         committed_at,
         relative_date,
         subject,
+        pr_url: None,
         detail: None,
         protections,
         decision: Decision::Undecided,
@@ -898,8 +944,8 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        App, CleanupGroup, CleanupMode, Decision, FIELD_SEPARATOR, Protection,
-        format_age_from_seconds, parse_branch_line,
+        App, Branch, CleanupGroup, CleanupMode, Decision, FIELD_SEPARATOR, Protection,
+        format_age_from_seconds, parse_branch_line, summarize_closed_candidates,
     };
 
     const SAMPLE_TIMESTAMP: &str = "1700000000";
@@ -1044,6 +1090,53 @@ mod tests {
         assert_eq!(
             format_age_from_seconds(18 * 30 * 24 * 60 * 60),
             "18 months ago"
+        );
+    }
+
+    #[test]
+    fn summarize_closed_candidates_lists_branch_names() {
+        let branches = vec![
+            Branch {
+                name: String::from("feature/one"),
+                upstream: Some(String::from("origin/feature/one")),
+                upstream_track: String::new(),
+                committed_at: 1_700_000_001,
+                relative_date: String::from("1 day ago"),
+                subject: String::from("first"),
+                pr_url: None,
+                detail: None,
+                protections: Vec::new(),
+                decision: Decision::Undecided,
+            },
+            Branch {
+                name: String::from("feature/two"),
+                upstream: Some(String::from("origin/feature/two")),
+                upstream_track: String::new(),
+                committed_at: 1_700_000_000,
+                relative_date: String::from("2 days ago"),
+                subject: String::from("second"),
+                pr_url: None,
+                detail: None,
+                protections: Vec::new(),
+                decision: Decision::Undecided,
+            },
+            Branch {
+                name: String::from("main"),
+                upstream: Some(String::from("origin/main")),
+                upstream_track: String::new(),
+                committed_at: 1_699_999_999,
+                relative_date: String::from("3 days ago"),
+                subject: String::from("main"),
+                pr_url: None,
+                detail: None,
+                protections: vec![Protection::Main],
+                decision: Decision::Undecided,
+            },
+        ];
+
+        assert_eq!(
+            summarize_closed_candidates(&branches, "origin"),
+            Some(String::from("feature/one, feature/two"))
         );
     }
 }
