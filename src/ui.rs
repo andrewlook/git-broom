@@ -56,10 +56,31 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     frame.render_stateful_widget(list, content[1], &mut state);
 
-    let footer = Paragraph::new(
-        "j/k move  d toggle delete  a all  u clear  Enter review  q/ctrl-c/ctrl-d quit",
-    );
-    frame.render_widget(footer, chunks[1]);
+    let footer_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(28)])
+        .split(chunks[1]);
+
+    let footer_left = Paragraph::new(Line::from(vec![
+        key_hint("j / k"),
+        desc_hint(" (up / down)  "),
+        key_hint("d"),
+        desc_hint(" (delete)  "),
+        key_hint("a"),
+        desc_hint(" (delete all)  "),
+        key_hint("u"),
+        desc_hint(" (clear)  "),
+        key_hint("q"),
+        desc_hint(" (quit)"),
+    ]));
+    frame.render_widget(footer_left, footer_chunks[0]);
+
+    let footer_right = Paragraph::new(Line::from(vec![
+        key_hint("enter"),
+        desc_hint(" (review deletions)"),
+    ]))
+    .alignment(Alignment::Right);
+    frame.render_widget(footer_right, footer_chunks[1]);
 
     if let Some(modal) = &app.modal {
         let area = centered_rect(72, 26, frame.area());
@@ -73,13 +94,20 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_header(width: usize) -> Line<'static> {
-    let (branch_width, commit_width, age_width) = column_widths(width.saturating_sub(4));
+    let row_prefix_width = 5;
+    let (branch_width, commit_width, age_width) =
+        column_widths(width.saturating_sub(row_prefix_width));
+    let header_style = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
+
     Line::from(vec![
-        Span::raw(pad("branch name", branch_width)),
+        Span::raw(" ".repeat(row_prefix_width)),
+        Span::styled(pad("branch name", branch_width), header_style),
         Span::raw("  "),
-        Span::raw(left_pad("last commit", commit_width)),
+        Span::styled(left_pad("last commit", commit_width), header_style),
         Span::raw("  "),
-        Span::raw(left_pad("age", age_width)),
+        Span::styled(left_pad("age", age_width), header_style),
     ])
 }
 
@@ -177,4 +205,12 @@ fn centered_rect(horizontal_percent: u16, vertical_percent: u16, area: Rect) -> 
             Constraint::Percentage((100 - horizontal_percent) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn key_hint(text: &'static str) -> Span<'static> {
+    Span::styled(text, Style::default().add_modifier(Modifier::BOLD))
+}
+
+fn desc_hint(text: &'static str) -> Span<'static> {
+    Span::styled(text, Style::default().fg(Color::DarkGray))
 }
