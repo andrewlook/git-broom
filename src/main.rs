@@ -12,7 +12,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use git_broom::app::{
-    App, Branch, CleanupMode, DeleteResult, IMPLEMENTED_MODES, Tranche, delete_branches,
+    App, Branch, CleanupGroup, CleanupMode, DeleteResult, IMPLEMENTED_MODES, delete_branches,
     scan_selected_modes,
 };
 use ratatui::Terminal;
@@ -28,12 +28,12 @@ fn main() {
 fn run() -> Result<()> {
     let cli = parse_cli(env::args().skip(1))?;
     let repo = env::current_dir()?;
-    let tranches = scan_selected_modes(&repo, &cli.modes)?;
+    let groups = scan_selected_modes(&repo, &cli.modes)?;
 
     match cli.output {
-        OutputMode::Interactive => run_interactive(&repo, tranches),
-        OutputMode::Batch => run_batch(&tranches),
-        OutputMode::DryRun => run_dry_run(&tranches),
+        OutputMode::Interactive => run_interactive(&repo, groups),
+        OutputMode::Batch => run_batch(&groups),
+        OutputMode::DryRun => run_dry_run(&groups),
     }
 }
 
@@ -91,23 +91,23 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
     Ok(CliOptions { modes, output })
 }
 
-fn run_interactive(repo: &Path, tranches: Vec<Tranche>) -> Result<()> {
-    if tranches.iter().all(|tranche| tranche.branches.is_empty()) {
+fn run_interactive(repo: &Path, groups: Vec<CleanupGroup>) -> Result<()> {
+    if groups.iter().all(|group| group.branches.is_empty()) {
         println!("No branches found for selected cleanup modes.");
         return Ok(());
     }
 
-    let tranche_count = tranches.len();
+    let group_count = groups.len();
     let mut total_deleted = 0;
     let mut total_failed = 0;
 
-    for (index, tranche) in tranches.into_iter().enumerate() {
-        if tranche.branches.is_empty() {
-            println!("{}", tranche.mode.no_matches_message());
+    for (index, group) in groups.into_iter().enumerate() {
+        if group.branches.is_empty() {
+            println!("{}", group.mode.no_matches_message());
             continue;
         }
 
-        let mut app = App::from_tranche(tranche, index + 1, tranche_count);
+        let mut app = App::from_group(group, index + 1, group_count);
         match run_tui(&mut app)? {
             ExitAction::Quit => {
                 println!("Aborted.");
@@ -152,16 +152,16 @@ fn run_interactive(repo: &Path, tranches: Vec<Tranche>) -> Result<()> {
     Ok(())
 }
 
-fn run_batch(tranches: &[Tranche]) -> Result<()> {
-    for line in format_preview_lines(tranches) {
+fn run_batch(groups: &[CleanupGroup]) -> Result<()> {
+    for line in format_preview_lines(groups) {
         println!("{line}");
     }
 
     Ok(())
 }
 
-fn run_dry_run(tranches: &[Tranche]) -> Result<()> {
-    for line in format_preview_lines(tranches) {
+fn run_dry_run(groups: &[CleanupGroup]) -> Result<()> {
+    for line in format_preview_lines(groups) {
         println!("{line}");
     }
 
@@ -248,18 +248,18 @@ fn print_delete_results(mode: CleanupMode, results: &[DeleteResult]) -> (usize, 
     (deleted, failed)
 }
 
-fn format_preview_lines(tranches: &[Tranche]) -> Vec<String> {
+fn format_preview_lines(groups: &[CleanupGroup]) -> Vec<String> {
     let mut lines = Vec::new();
     let (branch_width, commit_width, age_width) = preview_column_widths();
     let total_width = preview_total_width(branch_width, commit_width, age_width);
-    let step_count = tranches
+    let step_count = groups
         .iter()
-        .filter(|tranche| !tranche.branches.is_empty())
+        .filter(|group| !group.branches.is_empty())
         .count();
     let mut step_index = 0;
 
-    for tranche in tranches {
-        if tranche.branches.is_empty() {
+    for group in groups {
+        if group.branches.is_empty() {
             continue;
         }
 
@@ -269,7 +269,7 @@ fn format_preview_lines(tranches: &[Tranche]) -> Vec<String> {
 
         step_index += 1;
         lines.push(format_preview_title(
-            tranche.mode,
+            group.mode,
             step_index,
             step_count,
             total_width,
@@ -277,7 +277,7 @@ fn format_preview_lines(tranches: &[Tranche]) -> Vec<String> {
         lines.push(format_preview_header(branch_width, commit_width, age_width));
         lines.push(format_preview_rule(branch_width, commit_width, age_width));
         lines.extend(
-            tranche
+            group
                 .branches
                 .iter()
                 .map(|branch| format_preview_branch(branch, branch_width, commit_width, age_width)),
@@ -452,7 +452,7 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use git_broom::app::{Branch, CleanupMode, Decision, Tranche};
+    use git_broom::app::{Branch, CleanupGroup, CleanupMode, Decision};
 
     use super::{OutputMode, fit_for_column, format_preview_lines, is_immediate_exit, parse_cli};
 
@@ -500,11 +500,11 @@ mod tests {
     #[test]
     fn format_preview_lines_groups_branches_by_mode() {
         let lines = format_preview_lines(&[
-            Tranche {
+            CleanupGroup {
                 mode: CleanupMode::Gone,
                 branches: vec![sample_branch("feature/delete-me")],
             },
-            Tranche {
+            CleanupGroup {
                 mode: CleanupMode::Unpushed,
                 branches: vec![sample_branch("feature/local-only")],
             },

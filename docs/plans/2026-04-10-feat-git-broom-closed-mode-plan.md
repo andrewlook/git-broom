@@ -21,7 +21,7 @@ This is the most complex mode — it requires the `gh` CLI, network access, and 
 
 ```
 git-broom closed                 # only review closed/no-PR branches
-git-broom gone unpushed closed   # review explicit tranches in order
+git-broom gone unpushed closed   # review explicit groups in order
 git-broom closed --batch         # print branch names to stdout
 git-broom closed --remote origin # specify remote (default: origin)
 ```
@@ -51,7 +51,7 @@ Both local and remote — `git push origin :BRANCH` then `git branch -D`.
 - Last commit date
 - PR status: `#142 closed`, `#98 merged`, `no PR`
 - PR URL (shown in a detail line below the branch name)
-- Tranche affordance text explaining what `closed` means in the cleanup workflow
+- Group affordance text explaining what `closed` means in the cleanup workflow
 
 ### Pre-flight checks (beyond v1)
 
@@ -61,11 +61,11 @@ Both local and remote — `git push origin :BRANCH` then `git branch -D`.
 
 ### CLI flow
 
-`closed` should fit into the same tranche workflow as `gone` and `unpushed`:
+`closed` should fit into the same cleanup-group workflow as `gone` and `unpushed`:
 
-- default interactive mode reviews all implemented tranches in order
-- explicit positional args limit the run to the requested tranches
-- `--dry-run` groups results by tranche header
+- default interactive mode reviews all implemented groups in order
+- explicit positional args limit the run to the requested groups
+- `--dry-run` groups results by group header
 
 ### New dependencies
 
@@ -99,7 +99,7 @@ Same as v1/v2 plus:
 - [ ] Remote branch deleted first, then local
 - [ ] Graceful handling when `gh` is missing or unauthenticated
 - [ ] `--batch` and `--dry-run` work with `closed` mode
-- [ ] `closed` participates in the multi-tranche interactive workflow and grouped dry-run output
+- [ ] `closed` participates in the multi-group interactive workflow and grouped dry-run output
 - [ ] `--remote` flag to specify non-origin remote
 - [ ] Open PRs are excluded
 - [ ] Protected branches are excluded

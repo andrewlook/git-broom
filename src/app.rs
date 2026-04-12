@@ -125,7 +125,7 @@ impl Branch {
 }
 
 #[derive(Debug, Clone)]
-pub struct Tranche {
+pub struct CleanupGroup {
     pub mode: CleanupMode,
     pub branches: Vec<Branch>,
 }
@@ -147,12 +147,12 @@ pub struct Modal {
 }
 
 impl App {
-    pub fn from_tranche(tranche: Tranche, step_index: usize, step_count: usize) -> Self {
+    pub fn from_group(group: CleanupGroup, step_index: usize, step_count: usize) -> Self {
         Self {
-            mode: tranche.mode,
+            mode: group.mode,
             step_index,
             step_count,
-            branches: tranche.branches,
+            branches: group.branches,
             selected: 0,
             modal: None,
         }
@@ -250,7 +250,7 @@ pub struct DeleteResult {
     pub message: String,
 }
 
-pub fn scan_selected_modes(repo: &Path, modes: &[CleanupMode]) -> Result<Vec<Tranche>> {
+pub fn scan_selected_modes(repo: &Path, modes: &[CleanupMode]) -> Result<Vec<CleanupGroup>> {
     ensure_work_tree(repo)?;
 
     let current_branch = current_branch(repo)?;
@@ -267,7 +267,7 @@ pub fn scan_selected_modes(repo: &Path, modes: &[CleanupMode]) -> Result<Vec<Tra
                 .cloned()
                 .collect::<Vec<_>>();
 
-            Tranche { mode, branches }
+            CleanupGroup { mode, branches }
         })
         .collect())
 }
@@ -461,7 +461,7 @@ fn git_output_raw(repo: &Path, args: &[&str]) -> Result<Output> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{App, CleanupMode, Decision, Protection, Tranche, parse_branch_line};
+    use super::{App, CleanupGroup, CleanupMode, Decision, Protection, parse_branch_line};
 
     #[test]
     fn parse_branch_line_marks_current_branch_as_protected() {
@@ -538,8 +538,8 @@ mod tests {
             &HashSet::new(),
         )
         .expect("branch parsed");
-        let mut app = App::from_tranche(
-            Tranche {
+        let mut app = App::from_group(
+            CleanupGroup {
                 mode: CleanupMode::Gone,
                 branches: vec![branch],
             },
@@ -562,8 +562,8 @@ mod tests {
             &HashSet::new(),
         )
         .expect("branch parsed");
-        let mut app = App::from_tranche(
-            Tranche {
+        let mut app = App::from_group(
+            CleanupGroup {
                 mode: CleanupMode::Gone,
                 branches: vec![branch],
             },

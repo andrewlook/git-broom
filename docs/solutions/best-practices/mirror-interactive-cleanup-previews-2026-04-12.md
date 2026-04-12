@@ -8,7 +8,7 @@ component: tooling
 severity: medium
 applies_when:
   - Building destructive CLI or TUI cleanup flows with a dry-run mode
-  - Adding multiple review steps or tranches to an existing interactive tool
+  - Adding multiple review steps or groups to an existing interactive tool
   - Showing protected or ineligible items that must stay visible during review
 tags:
   - git-broom
@@ -24,7 +24,7 @@ tags:
 
 ## Context
 
-`git-broom` started as a single-tranche interactive cleanup tool, then grew into a multi-step workflow with `gone` and `unpushed` tranches, protected-branch handling, and per-tranche confirmation. Once the interactive flow became richer, the old flat `--dry-run` and `--batch` output stopped matching what users actually reviewed in the TUI, which made the preview less trustworthy.
+`git-broom` started as a single-step interactive cleanup tool, then grew into a multi-step workflow with `gone` and `unpushed` groups, protected-branch handling, and per-group confirmation. Once the interactive flow became richer, the old flat `--dry-run` and `--batch` output stopped matching what users actually reviewed in the TUI, which made the preview less trustworthy.
 
 ## Guidance
 
@@ -32,16 +32,16 @@ Use one shared workflow model for both interactive and non-interactive paths, th
 
 In `git-broom`, the shared model lives in `src/app.rs`:
 
-- `CleanupMode` defines each cleanup tranche and its explanation text.
-- `Tranche` carries the branches for one step of the workflow.
-- `scan_selected_modes()` returns the same tranche structure no matter how the command will be displayed.
+- `CleanupMode` defines each cleanup group and its explanation text.
+- `CleanupGroup` carries the branches for one step of the workflow.
+- `scan_selected_modes()` returns the same group structure no matter how the command will be displayed.
 - `Branch::display_name()` keeps protected labels such as `(current branch)` attached to the branch in every presentation.
 
 Then keep the entry points in `src/main.rs` thin:
 
-- `run_interactive()` walks the tranche list one step at a time.
-- `run_dry_run()` and `run_batch()` both call `format_preview_lines()` so the preview uses the same tranche ordering and visibility rules as the interactive flow.
-- `format_preview_title()` mirrors the title grammar from `render_title()` in `src/ui.rs`, including the tranche explanation and step count.
+- `run_interactive()` walks the group list one step at a time.
+- `run_dry_run()` and `run_batch()` both call `format_preview_lines()` so the preview uses the same group ordering and visibility rules as the interactive flow.
+- `format_preview_title()` mirrors the title grammar from `render_title()` in `src/ui.rs`, including the group explanation and step count.
 
 That shared dispatch is the key guardrail:
 
@@ -58,7 +58,7 @@ match cli.output {
 For destructive actions, preserve safety semantics across every output mode:
 
 - Keep protected branches visible instead of filtering them out entirely.
-- Show the same tranche names and explanations in preview output that the TUI shows in its title bar.
+- Show the same group names and explanations in preview output that the TUI shows in its title bar.
 - Make abort behavior immediate and predictable (`Ctrl-C`, `Ctrl-D`, and `q` should all mean "leave without applying triage changes").
 - Treat human readability as the default for preview output unless the product explicitly needs machine-oriented batch output.
 
@@ -66,7 +66,7 @@ For destructive actions, preserve safety semantics across every output mode:
 
 Users treat `--dry-run` as a rehearsal for the real action. If the preview flattens the workflow, hides protected branches, or reorders what the TUI will show, users have to re-learn the tool once they enter interactive mode. That is especially risky for destructive cleanup commands because trust depends on being able to predict exactly what the next screen will do.
 
-Using one tranche model also reduces drift inside the codebase. When the workflow changes, the scan logic, interactive flow, and preview output stay aligned because they are all derived from the same `CleanupMode` and `Tranche` data instead of parallel ad hoc formatting paths.
+Using one group model also reduces drift inside the codebase. When the workflow changes, the scan logic, interactive flow, and preview output stay aligned because they are all derived from the same `CleanupMode` and `CleanupGroup` data instead of parallel ad hoc formatting paths.
 
 ## When to Apply
 
@@ -105,7 +105,7 @@ The preview formatter should also reuse the same row structure the TUI shows:
 
 ```rust
 lines.push(format_preview_title(
-    tranche.mode,
+    group.mode,
     step_index,
     step_count,
     total_width,
@@ -113,7 +113,7 @@ lines.push(format_preview_title(
 lines.push(format_preview_header(branch_width, commit_width, age_width));
 lines.push(format_preview_rule(branch_width, commit_width, age_width));
 lines.extend(
-    tranche
+    group
         .branches
         .iter()
         .map(|branch| format_preview_branch(branch, branch_width, commit_width, age_width)),
@@ -124,5 +124,5 @@ lines.extend(
 
 - `README.md` documents the user-facing tranche workflow and preview commands.
 - `docs/archive/2026-04-10-feat-git-broom-interactive-branch-cleanup-plan.md` captures the original gone-only cleanup design.
-- `docs/archive/2026-04-10-feat-git-broom-unpushed-mode-plan.md` captures the tranche expansion that introduced `unpushed`.
+- `docs/archive/2026-04-10-feat-git-broom-unpushed-mode-plan.md` captures the group-based expansion that introduced `unpushed`.
 - GitHub issues: `#1` Interactive git branch cleanup TUI (v1 - gone mode), `#2` git-broom unpushed mode (v2), `#3` git-broom closed mode (v2/v3).

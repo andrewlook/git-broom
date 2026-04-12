@@ -10,9 +10,9 @@ fn scan_returns_gone_branch_as_deletable() {
     let repo = TestRepo::new();
     repo.create_gone_branch("feature/gone");
 
-    let tranches =
+    let groups =
         scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
-    let branch = find_branch(&tranches, CleanupMode::Gone, "feature/gone");
+    let branch = find_branch(&groups, CleanupMode::Gone, "feature/gone");
 
     assert!(branch.protections.is_empty());
     assert!(branch.is_deletable());
@@ -23,9 +23,9 @@ fn scan_returns_unpushed_branch_as_deletable() {
     let repo = TestRepo::new();
     repo.create_unpushed_branch("feature/local-only");
 
-    let tranches =
+    let groups =
         scan_selected_modes(repo.local_path(), &[CleanupMode::Unpushed]).expect("scan succeeds");
-    let branch = find_branch(&tranches, CleanupMode::Unpushed, "feature/local-only");
+    let branch = find_branch(&groups, CleanupMode::Unpushed, "feature/local-only");
 
     assert!(branch.protections.is_empty());
     assert!(branch.is_deletable());
@@ -37,9 +37,9 @@ fn scan_marks_current_branch_as_protected() {
     repo.create_gone_branch("feature/current");
     repo.git_local(["checkout", "feature/current"]);
 
-    let tranches =
+    let groups =
         scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
-    let branch = find_branch(&tranches, CleanupMode::Gone, "feature/current");
+    let branch = find_branch(&groups, CleanupMode::Gone, "feature/current");
 
     assert_eq!(branch.protections, vec![Protection::Current]);
     assert!(!branch.is_deletable());
@@ -57,9 +57,9 @@ fn scan_marks_other_worktree_branch_as_protected() {
         "feature/worktree",
     ]);
 
-    let tranches =
+    let groups =
         scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
-    let branch = find_branch(&tranches, CleanupMode::Gone, "feature/worktree");
+    let branch = find_branch(&groups, CleanupMode::Gone, "feature/worktree");
 
     assert_eq!(branch.protections, vec![Protection::Worktree]);
     assert!(!branch.is_deletable());
@@ -75,10 +75,10 @@ fn scan_works_from_detached_head() {
         .to_string();
     repo.git_local(["checkout", "--detach", &main_head]);
 
-    let tranches =
+    let groups =
         scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
     assert!(
-        tranches[0]
+        groups[0]
             .branches
             .iter()
             .any(|branch| branch.name == "feature/detached")
@@ -86,38 +86,38 @@ fn scan_works_from_detached_head() {
 }
 
 #[test]
-fn scan_keeps_gone_and_unpushed_tranches_separate() {
+fn scan_keeps_gone_and_unpushed_groups_separate() {
     let repo = TestRepo::new();
     repo.create_gone_branch("feature/gone");
     repo.create_unpushed_branch("feature/local-only");
 
-    let tranches = scan_selected_modes(
+    let groups = scan_selected_modes(
         repo.local_path(),
         &[CleanupMode::Gone, CleanupMode::Unpushed],
     )
     .expect("scan succeeds");
 
     assert!(
-        find_tranche(&tranches, CleanupMode::Gone)
+        find_group(&groups, CleanupMode::Gone)
             .branches
             .iter()
             .any(|branch| branch.name == "feature/gone")
     );
     assert!(
-        !find_tranche(&tranches, CleanupMode::Gone)
+        !find_group(&groups, CleanupMode::Gone)
             .branches
             .iter()
             .any(|branch| branch.name == "feature/local-only")
     );
 
     assert!(
-        find_tranche(&tranches, CleanupMode::Unpushed)
+        find_group(&groups, CleanupMode::Unpushed)
             .branches
             .iter()
             .any(|branch| branch.name == "feature/local-only")
     );
     assert!(
-        !find_tranche(&tranches, CleanupMode::Unpushed)
+        !find_group(&groups, CleanupMode::Unpushed)
             .branches
             .iter()
             .any(|branch| branch.name == "feature/gone")
@@ -205,22 +205,22 @@ impl TestRepo {
     }
 }
 
-fn find_tranche(
-    tranches: &[git_broom::app::Tranche],
+fn find_group(
+    groups: &[git_broom::app::CleanupGroup],
     mode: CleanupMode,
-) -> &git_broom::app::Tranche {
-    tranches
+) -> &git_broom::app::CleanupGroup {
+    groups
         .iter()
-        .find(|tranche| tranche.mode == mode)
-        .expect("tranche present")
+        .find(|group| group.mode == mode)
+        .expect("group present")
 }
 
 fn find_branch<'a>(
-    tranches: &'a [git_broom::app::Tranche],
+    groups: &'a [git_broom::app::CleanupGroup],
     mode: CleanupMode,
     branch_name: &str,
 ) -> &'a git_broom::app::Branch {
-    find_tranche(tranches, mode)
+    find_group(groups, mode)
         .branches
         .iter()
         .find(|branch| branch.name == branch_name)
