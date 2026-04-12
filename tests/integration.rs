@@ -1,8 +1,11 @@
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use git_broom::app::{CleanupMode, Protection, scan_selected_modes};
+use git_broom::app::{
+    Branch, CleanupMode, Decision, Protection, delete_branches, scan_selected_modes,
+};
 use tempfile::TempDir;
 
 #[test]
@@ -10,8 +13,8 @@ fn scan_returns_gone_branch_as_deletable() {
     let repo = TestRepo::new();
     repo.create_gone_branch("feature/gone");
 
-    let groups =
-        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Gone], "origin")
+        .expect("scan succeeds");
     let branch = find_branch(&groups, CleanupMode::Gone, "feature/gone");
 
     assert!(branch.protections.is_empty());
@@ -23,8 +26,8 @@ fn scan_returns_unpushed_branch_as_deletable() {
     let repo = TestRepo::new();
     repo.create_unpushed_branch("feature/local-only");
 
-    let groups =
-        scan_selected_modes(repo.local_path(), &[CleanupMode::Unpushed]).expect("scan succeeds");
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Unpushed], "origin")
+        .expect("scan succeeds");
     let branch = find_branch(&groups, CleanupMode::Unpushed, "feature/local-only");
 
     assert!(branch.protections.is_empty());
@@ -37,8 +40,8 @@ fn scan_marks_current_branch_as_protected() {
     repo.create_gone_branch("feature/current");
     repo.git_local(["checkout", "feature/current"]);
 
-    let groups =
-        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Gone], "origin")
+        .expect("scan succeeds");
     let branch = find_branch(&groups, CleanupMode::Gone, "feature/current");
 
     assert_eq!(branch.protections, vec![Protection::Current]);
@@ -57,8 +60,8 @@ fn scan_marks_other_worktree_branch_as_protected() {
         "feature/worktree",
     ]);
 
-    let groups =
-        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Gone], "origin")
+        .expect("scan succeeds");
     let branch = find_branch(&groups, CleanupMode::Gone, "feature/worktree");
 
     assert_eq!(branch.protections, vec![Protection::Worktree]);
@@ -75,8 +78,8 @@ fn scan_works_from_detached_head() {
         .to_string();
     repo.git_local(["checkout", "--detach", &main_head]);
 
-    let groups =
-        scan_selected_modes(repo.local_path(), &[CleanupMode::Gone]).expect("scan succeeds");
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Gone], "origin")
+        .expect("scan succeeds");
     assert!(
         groups[0]
             .branches
@@ -94,6 +97,7 @@ fn scan_keeps_gone_and_unpushed_groups_separate() {
     let groups = scan_selected_modes(
         repo.local_path(),
         &[CleanupMode::Gone, CleanupMode::Unpushed],
+        "origin",
     )
     .expect("scan succeeds");
 
@@ -122,6 +126,78 @@ fn scan_keeps_gone_and_unpushed_groups_separate() {
             .iter()
             .any(|branch| branch.name == "feature/gone")
     );
+}
+
+#[test]
+fn dry_run_groups_closed_mode_by_reason() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+    repo.create_remote_tracked_branch("feature/merged", "origin");
+    repo.create_remote_tracked_branch("feature/open", "origin");
+    repo.create_remote_tracked_branch("feature/no-pr", "origin");
+
+    let fake_gh_dir = repo.install_fake_gh(
+        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"},{"number":2,"title":"Merged PR","state":"MERGED","headRefName":"feature/merged","url":"https://example.test/pr/2"},{"number":3,"title":"Open PR","state":"OPEN","headRefName":"feature/open","url":"https://example.test/pr/3"}]"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["closed", "--dry-run"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&fake_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("[closed: closed pull request or no pull request on GitHub]"));
+    assert!(stdout.contains("feature/closed"));
+    assert!(stdout.contains("#1 closed · Closed PR · https://example.test/pr/1"));
+    assert!(stdout.contains("feature/no-pr"));
+    assert!(stdout.contains("no PR"));
+    assert!(stdout.contains("[merged: pull request merged but remote branch still exists]"));
+    assert!(stdout.contains("feature/merged"));
+    assert!(stdout.contains("#2 merged · Merged PR · https://example.test/pr/2"));
+    assert!(!stdout.contains("feature/open"));
+}
+
+#[test]
+fn delete_closed_branch_removes_remote_then_local() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+
+    let branch = tracked_branch("feature/closed", "origin");
+    let results = delete_branches(repo.local_path(), CleanupMode::Closed, "origin", &[&branch]);
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].success, "{}", results[0].message);
+    assert!(!repo.local_branch_exists("feature/closed"));
+    assert!(!repo.remote_branch_exists("feature/closed"));
+}
+
+#[test]
+fn delete_closed_branch_keeps_local_branch_when_remote_delete_fails() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+    let broken_remote = repo.temp_path("missing-remote.git");
+    repo.git_local([
+        "remote",
+        "set-url",
+        "origin",
+        broken_remote.to_str().expect("utf8 path"),
+    ]);
+
+    let branch = tracked_branch("feature/closed", "origin");
+    let results = delete_branches(repo.local_path(), CleanupMode::Closed, "origin", &[&branch]);
+
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].success);
+    assert!(repo.local_branch_exists("feature/closed"));
 }
 
 struct TestRepo {
@@ -176,6 +252,12 @@ impl TestRepo {
         self.git_local(["checkout", "main"]);
     }
 
+    fn create_remote_tracked_branch(&self, branch: &str, remote: &str) {
+        self.create_local_branch(branch);
+        self.git_local(["push", "-u", remote, branch]);
+        self.git_local(["checkout", "main"]);
+    }
+
     fn create_local_branch(&self, branch: &str) {
         let file_name = branch.replace('/', "_");
         self.git_local(["checkout", "-b", branch]);
@@ -202,6 +284,33 @@ impl TestRepo {
 
     fn temp_path(&self, name: &str) -> PathBuf {
         self._root.path().join(name)
+    }
+
+    fn install_fake_gh(&self, pr_list_json: &str) -> PathBuf {
+        let bin_dir = self.temp_path("fake-bin");
+        fs::create_dir_all(&bin_dir).expect("fake bin dir created");
+        let script_path = bin_dir.join("gh");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'gh version 999.0.0'\n  exit 0\nfi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"repo\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s' '{{\"defaultBranchRef\":{{\"name\":\"main\"}}}}'\n  exit 0\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  cat <<'EOF'\n{pr_list_json}\nEOF\n  exit 0\nfi\nprintf 'unexpected gh invocation: %s\\n' \"$*\" >&2\nexit 1\n"
+        );
+        fs::write(&script_path, script).expect("fake gh written");
+        let output = Command::new("chmod")
+            .args(["+x", script_path.to_str().expect("utf8 path")])
+            .output()
+            .expect("chmod runs");
+        assert!(output.status.success(), "chmod failed");
+        bin_dir
+    }
+
+    fn local_branch_exists(&self, branch: &str) -> bool {
+        let output = self.git_local_stdout(["branch", "--list", branch]);
+        output.lines().any(|line| line.trim_end().ends_with(branch))
+    }
+
+    fn remote_branch_exists(&self, branch: &str) -> bool {
+        self.git_local_stdout(["ls-remote", "--heads", "origin", branch])
+            .lines()
+            .any(|line| !line.trim().is_empty())
     }
 }
 
@@ -259,4 +368,22 @@ fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> String {
     );
 
     String::from_utf8(output.stdout).expect("utf8 git output")
+}
+
+fn tracked_branch(name: &str, remote: &str) -> Branch {
+    Branch {
+        name: name.to_string(),
+        upstream: Some(format!("{remote}/{name}")),
+        upstream_track: String::new(),
+        relative_date: String::from("1 day ago"),
+        subject: String::from("subject"),
+        detail: None,
+        protections: Vec::new(),
+        decision: Decision::Delete,
+    }
+}
+
+fn path_with_prefix(prefix: &Path) -> String {
+    let existing = env::var("PATH").unwrap_or_default();
+    format!("{}:{existing}", prefix.display())
 }

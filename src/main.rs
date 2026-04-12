@@ -28,10 +28,10 @@ fn main() {
 fn run() -> Result<()> {
     let cli = parse_cli(env::args().skip(1))?;
     let repo = env::current_dir()?;
-    let groups = scan_selected_modes(&repo, &cli.modes)?;
+    let groups = scan_selected_modes(&repo, &cli.modes, &cli.remote)?;
 
     match cli.output {
-        OutputMode::Interactive => run_interactive(&repo, groups),
+        OutputMode::Interactive => run_interactive(&repo, &cli.remote, groups),
         OutputMode::Batch => run_batch(&groups),
         OutputMode::DryRun => run_dry_run(&groups),
     }
@@ -48,13 +48,16 @@ enum OutputMode {
 struct CliOptions {
     modes: Vec<CleanupMode>,
     output: OutputMode,
+    remote: String,
 }
 
 fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
     let mut modes = Vec::new();
     let mut output = OutputMode::Interactive;
+    let mut remote = String::from("origin");
+    let mut args = args.peekable();
 
-    for arg in args {
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--batch" => {
                 if output == OutputMode::DryRun {
@@ -72,6 +75,12 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
                 print_usage();
                 process::exit(0);
             }
+            "--remote" => {
+                let Some(value) = args.next() else {
+                    bail!("--remote requires a value\n\n{}", usage_text());
+                };
+                remote = value;
+            }
             value => {
                 let Some(mode) = CleanupMode::from_arg(value) else {
                     bail!("unknown cleanup mode `{value}`\n\n{}", usage_text());
@@ -88,10 +97,14 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
         modes = IMPLEMENTED_MODES.to_vec();
     }
 
-    Ok(CliOptions { modes, output })
+    Ok(CliOptions {
+        modes,
+        output,
+        remote,
+    })
 }
 
-fn run_interactive(repo: &Path, groups: Vec<CleanupGroup>) -> Result<()> {
+fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Result<()> {
     if groups.iter().all(|group| group.branches.is_empty()) {
         println!("No branches found for selected cleanup modes.");
         return Ok(());
@@ -103,7 +116,9 @@ fn run_interactive(repo: &Path, groups: Vec<CleanupGroup>) -> Result<()> {
 
     for (index, group) in groups.into_iter().enumerate() {
         if group.branches.is_empty() {
-            println!("{}", group.mode.no_matches_message());
+            if group.show_empty_message {
+                println!("{}", group.mode.no_matches_message());
+            }
             continue;
         }
 
@@ -114,34 +129,32 @@ fn run_interactive(repo: &Path, groups: Vec<CleanupGroup>) -> Result<()> {
                 return Ok(());
             }
             ExitAction::Confirm => {
-                let branches_to_delete = app
-                    .delete_candidates()
-                    .into_iter()
-                    .map(|branch| branch.name.clone())
-                    .collect::<Vec<_>>();
+                let branches_to_delete = app.delete_candidates();
 
                 if branches_to_delete.is_empty() {
-                    println!("No {} branches selected for deletion.", app.mode.name());
+                    println!("No {} branches selected for deletion.", app.group_name);
                     continue;
                 }
 
                 println!(
                     "About to delete {} {} branches ({}):",
                     branches_to_delete.len(),
-                    app.mode.name(),
-                    app.mode.description()
+                    app.group_name,
+                    app.group_description
                 );
                 for branch in &branches_to_delete {
-                    println!("  {branch}");
+                    println!("  {}", branch.name);
                 }
 
                 if !prompt_for_confirmation()? {
-                    println!("Skipped {}.", app.mode.name());
+                    println!("Skipped {}.", app.group_name);
                     continue;
                 }
 
-                let (deleted, failed) =
-                    print_delete_results(app.mode, &delete_branches(repo, &branches_to_delete));
+                let (deleted, failed) = print_delete_results(
+                    &app.group_name,
+                    &delete_branches(repo, app.mode, remote, &branches_to_delete),
+                );
                 total_deleted += deleted;
                 total_failed += failed;
             }
@@ -226,7 +239,7 @@ fn prompt_for_confirmation() -> Result<bool> {
     Ok(matches!(input.trim(), "y" | "Y"))
 }
 
-fn print_delete_results(mode: CleanupMode, results: &[DeleteResult]) -> (usize, usize) {
+fn print_delete_results(group_name: &str, results: &[DeleteResult]) -> (usize, usize) {
     let mut deleted = 0;
     let mut failed = 0;
 
@@ -240,10 +253,7 @@ fn print_delete_results(mode: CleanupMode, results: &[DeleteResult]) -> (usize, 
         }
     }
 
-    println!(
-        "{}: deleted {deleted} branches. {failed} failed.",
-        mode.name()
-    );
+    println!("{group_name}: deleted {deleted} branches. {failed} failed.");
 
     (deleted, failed)
 }
@@ -269,19 +279,17 @@ fn format_preview_lines(groups: &[CleanupGroup]) -> Vec<String> {
 
         step_index += 1;
         lines.push(format_preview_title(
-            group.mode,
+            &group.name,
+            &group.description,
             step_index,
             step_count,
             total_width,
         ));
         lines.push(format_preview_header(branch_width, commit_width, age_width));
         lines.push(format_preview_rule(branch_width, commit_width, age_width));
-        lines.extend(
-            group
-                .branches
-                .iter()
-                .map(|branch| format_preview_branch(branch, branch_width, commit_width, age_width)),
-        );
+        lines.extend(group.branches.iter().flat_map(|branch| {
+            format_preview_branch(branch, branch_width, commit_width, age_width)
+        }));
     }
 
     if lines.is_empty() {
@@ -294,12 +302,13 @@ fn format_preview_lines(groups: &[CleanupGroup]) -> Vec<String> {
 }
 
 fn format_preview_title(
-    mode: CleanupMode,
+    group_name: &str,
+    group_description: &str,
     step_index: usize,
     step_count: usize,
     total_width: usize,
 ) -> String {
-    let left = format!("  git-broom   [{}: {}]", mode.name(), mode.description());
+    let left = format!("  git-broom   [{group_name}: {group_description}]");
     let right = format!("({step_index}/{step_count})");
     let spacer_width = total_width.saturating_sub(left.chars().count() + right.chars().count());
 
@@ -335,8 +344,8 @@ fn format_preview_branch(
     branch_width: usize,
     commit_width: usize,
     age_width: usize,
-) -> String {
-    format!(
+) -> Vec<String> {
+    let mut lines = vec![format!(
         "  {}  {}  {}",
         pad(&branch.display_name(), branch_width),
         left_pad(
@@ -344,7 +353,19 @@ fn format_preview_branch(
             commit_width,
         ),
         left_pad(&branch.relative_date, age_width),
-    )
+    )];
+
+    if let Some(detail) = &branch.detail {
+        lines.push(format!(
+            "     {}",
+            truncate(
+                detail,
+                preview_total_width(branch_width, commit_width, age_width) - 5
+            )
+        ));
+    }
+
+    lines
 }
 
 fn preview_column_widths() -> (usize, usize, usize) {
@@ -395,7 +416,7 @@ fn left_pad(value: &str, width: usize) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "usage: git-broom [gone] [unpushed] [--batch | --dry-run]"
+    "usage: git-broom [gone] [unpushed] [closed] [--remote <name>] [--batch | --dry-run]"
 }
 
 fn print_usage() {
@@ -463,6 +484,7 @@ mod tests {
             upstream_track: "[gone]".to_string(),
             relative_date: "2 days ago".to_string(),
             subject: "subject line".to_string(),
+            detail: None,
             decision: Decision::Undecided,
             protections: Vec::new(),
         }
@@ -472,8 +494,16 @@ mod tests {
     fn parse_cli_defaults_to_all_modes() {
         let cli = parse_cli(std::iter::empty()).expect("cli parses");
 
-        assert_eq!(cli.modes, vec![CleanupMode::Gone, CleanupMode::Unpushed]);
+        assert_eq!(
+            cli.modes,
+            vec![
+                CleanupMode::Gone,
+                CleanupMode::Unpushed,
+                CleanupMode::Closed
+            ]
+        );
         assert_eq!(cli.output, OutputMode::Interactive);
+        assert_eq!(cli.remote, "origin");
     }
 
     #[test]
@@ -487,6 +517,21 @@ mod tests {
 
         assert_eq!(cli.modes, vec![CleanupMode::Gone, CleanupMode::Unpushed]);
         assert_eq!(cli.output, OutputMode::DryRun);
+        assert_eq!(cli.remote, "origin");
+    }
+
+    #[test]
+    fn parse_cli_accepts_remote_for_closed_mode() {
+        let cli = parse_cli(
+            ["closed", "--remote", "upstream"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("cli parses");
+
+        assert_eq!(cli.modes, vec![CleanupMode::Closed]);
+        assert_eq!(cli.output, OutputMode::Interactive);
+        assert_eq!(cli.remote, "upstream");
     }
 
     #[test]
@@ -500,14 +545,11 @@ mod tests {
     #[test]
     fn format_preview_lines_groups_branches_by_mode() {
         let lines = format_preview_lines(&[
-            CleanupGroup {
-                mode: CleanupMode::Gone,
-                branches: vec![sample_branch("feature/delete-me")],
-            },
-            CleanupGroup {
-                mode: CleanupMode::Unpushed,
-                branches: vec![sample_branch("feature/local-only")],
-            },
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![sample_branch("feature/delete-me")]),
+            CleanupGroup::from_mode(
+                CleanupMode::Unpushed,
+                vec![sample_branch("feature/local-only")],
+            ),
         ]);
 
         assert!(lines[0].starts_with("  git-broom   [gone: upstream branch no longer exists]"));

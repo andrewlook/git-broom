@@ -206,7 +206,7 @@ Use **cargo-dist** for automated cross-compilation, GitHub Releases, and Homebre
 ## Future work
 
 - `unpushed` mode — see `docs/archive/2026-04-10-feat-git-broom-unpushed-mode-plan.md`
-- `closed` mode — see `docs/plans/2026-04-10-feat-git-broom-closed-mode-plan.md`
+- `closed` mode — see `docs/archive/2026-04-10-feat-git-broom-closed-mode-plan.md`
 
 ## References
 

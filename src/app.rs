@@ -1,17 +1,23 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
 
 const FIELD_SEPARATOR: char = '\u{1f}';
 
-pub const IMPLEMENTED_MODES: [CleanupMode; 2] = [CleanupMode::Gone, CleanupMode::Unpushed];
+pub const IMPLEMENTED_MODES: [CleanupMode; 3] = [
+    CleanupMode::Gone,
+    CleanupMode::Unpushed,
+    CleanupMode::Closed,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CleanupMode {
     Gone,
     Unpushed,
+    Closed,
 }
 
 impl CleanupMode {
@@ -19,6 +25,7 @@ impl CleanupMode {
         match value {
             "gone" => Some(Self::Gone),
             "unpushed" => Some(Self::Unpushed),
+            "closed" => Some(Self::Closed),
             _ => None,
         }
     }
@@ -27,6 +34,7 @@ impl CleanupMode {
         match self {
             Self::Gone => "gone",
             Self::Unpushed => "unpushed",
+            Self::Closed => "closed",
         }
     }
 
@@ -34,6 +42,7 @@ impl CleanupMode {
         match self {
             Self::Gone => "upstream branch no longer exists",
             Self::Unpushed => "no upstream tracking branch is configured",
+            Self::Closed => "remote-tracked branch is closed or stale on GitHub",
         }
     }
 
@@ -41,6 +50,7 @@ impl CleanupMode {
         match self {
             Self::Gone => "No gone branches found.",
             Self::Unpushed => "No unpushed branches found.",
+            Self::Closed => "No closed branches found.",
         }
     }
 
@@ -48,6 +58,7 @@ impl CleanupMode {
         match self {
             Self::Gone => branch.upstream_track.contains("[gone]"),
             Self::Unpushed => branch.upstream.is_none(),
+            Self::Closed => false,
         }
     }
 }
@@ -64,6 +75,7 @@ pub enum Protection {
     Worktree,
     Main,
     Master,
+    DefaultBranch,
 }
 
 impl Protection {
@@ -73,6 +85,7 @@ impl Protection {
             Self::Worktree => "worktree",
             Self::Main => "main",
             Self::Master => "master",
+            Self::DefaultBranch => "default branch",
         }
     }
 
@@ -84,6 +97,7 @@ impl Protection {
             }
             Self::Main => "The main branch is ineligible for cleanup.",
             Self::Master => "The master branch is ineligible for cleanup.",
+            Self::DefaultBranch => "The default branch is ineligible for cleanup.",
         }
     }
 }
@@ -95,6 +109,7 @@ pub struct Branch {
     pub upstream_track: String,
     pub relative_date: String,
     pub subject: String,
+    pub detail: Option<String>,
     pub protections: Vec<Protection>,
     pub decision: Decision,
 }
@@ -122,17 +137,61 @@ impl Branch {
 
         format!("{} {}", self.name, labels)
     }
+
+    pub fn upstream_remote(&self) -> Option<&str> {
+        self.upstream
+            .as_deref()
+            .and_then(|upstream| upstream.split_once('/').map(|(remote, _)| remote))
+    }
+
+    pub fn upstream_branch_name(&self) -> Option<&str> {
+        self.upstream
+            .as_deref()
+            .and_then(|upstream| upstream.split_once('/').map(|(_, branch)| branch))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct CleanupGroup {
     pub mode: CleanupMode,
+    pub name: String,
+    pub description: String,
+    pub show_empty_message: bool,
     pub branches: Vec<Branch>,
+}
+
+impl CleanupGroup {
+    pub fn from_mode(mode: CleanupMode, branches: Vec<Branch>) -> Self {
+        Self {
+            mode,
+            name: mode.name().to_string(),
+            description: mode.description().to_string(),
+            show_empty_message: true,
+            branches,
+        }
+    }
+
+    pub fn named(
+        mode: CleanupMode,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        branches: Vec<Branch>,
+    ) -> Self {
+        Self {
+            mode,
+            name: name.into(),
+            description: description.into(),
+            show_empty_message: false,
+            branches,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct App {
     pub mode: CleanupMode,
+    pub group_name: String,
+    pub group_description: String,
     pub step_index: usize,
     pub step_count: usize,
     pub branches: Vec<Branch>,
@@ -150,6 +209,8 @@ impl App {
     pub fn from_group(group: CleanupGroup, step_index: usize, step_count: usize) -> Self {
         Self {
             mode: group.mode,
+            group_name: group.name,
+            group_description: group.description,
             step_index,
             step_count,
             branches: group.branches,
@@ -250,59 +311,94 @@ pub struct DeleteResult {
     pub message: String,
 }
 
-pub fn scan_selected_modes(repo: &Path, modes: &[CleanupMode]) -> Result<Vec<CleanupGroup>> {
-    ensure_work_tree(repo)?;
-
-    let current_branch = current_branch(repo)?;
-    let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
-    let all_branches = load_branch_inventory(repo, current_branch.as_deref(), &worktree_branches)?;
-
-    Ok(modes
-        .iter()
-        .copied()
-        .map(|mode| {
-            let branches = all_branches
-                .iter()
-                .filter(|branch| mode.matches(branch))
-                .cloned()
-                .collect::<Vec<_>>();
-
-            CleanupGroup { mode, branches }
-        })
-        .collect())
+#[derive(Debug, Clone, Deserialize)]
+struct PullRequestRef {
+    name: String,
 }
 
-pub fn delete_branches(repo: &Path, branches: &[String]) -> Vec<DeleteResult> {
+#[derive(Debug, Clone, Deserialize)]
+struct RepoView {
+    #[serde(rename = "defaultBranchRef")]
+    default_branch_ref: PullRequestRef,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PullRequestRecord {
+    number: u64,
+    title: String,
+    state: String,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    url: String,
+}
+
+#[derive(Debug, Clone)]
+struct ClosedModeData {
+    default_branch: String,
+    pull_requests: HashMap<String, PullRequestRecord>,
+}
+
+pub fn scan_selected_modes(
+    repo: &Path,
+    modes: &[CleanupMode],
+    remote: &str,
+) -> Result<Vec<CleanupGroup>> {
+    ensure_work_tree(repo)?;
+
+    let closed_mode_data = if modes.contains(&CleanupMode::Closed) {
+        Some(load_closed_mode_data(repo, remote)?)
+    } else {
+        None
+    };
+    let current_branch = current_branch(repo)?;
+    let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
+    let default_branch = closed_mode_data
+        .as_ref()
+        .map(|data| data.default_branch.as_str());
+    let all_branches = load_branch_inventory(
+        repo,
+        current_branch.as_deref(),
+        default_branch,
+        &worktree_branches,
+    )?;
+
+    let mut groups = Vec::new();
+    for mode in modes.iter().copied() {
+        match mode {
+            CleanupMode::Closed => groups.extend(build_closed_groups(
+                &all_branches,
+                closed_mode_data
+                    .as_ref()
+                    .expect("closed mode data loaded when mode selected"),
+                remote,
+            )),
+            _ => {
+                let branches = all_branches
+                    .iter()
+                    .filter(|branch| mode.matches(branch))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                groups.push(CleanupGroup::from_mode(mode, branches));
+            }
+        }
+    }
+
+    Ok(groups)
+}
+
+pub fn delete_branches(
+    repo: &Path,
+    mode: CleanupMode,
+    remote: &str,
+    branches: &[&Branch],
+) -> Vec<DeleteResult> {
     branches
         .iter()
         .map(|branch| {
-            let output = Command::new("git")
-                .args(["branch", "-D", branch])
-                .current_dir(repo)
-                .output();
-
-            match output {
-                Ok(output) if output.status.success() => DeleteResult {
-                    branch: branch.clone(),
-                    success: true,
-                    message: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                },
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let message = if stderr.is_empty() { stdout } else { stderr };
-
-                    DeleteResult {
-                        branch: branch.clone(),
-                        success: false,
-                        message,
-                    }
-                }
-                Err(error) => DeleteResult {
-                    branch: branch.clone(),
-                    success: false,
-                    message: error.to_string(),
-                },
+            if mode == CleanupMode::Closed {
+                delete_closed_branch(repo, remote, branch)
+            } else {
+                delete_local_branch(repo, branch)
             }
         })
         .collect()
@@ -311,6 +407,7 @@ pub fn delete_branches(repo: &Path, branches: &[String]) -> Vec<DeleteResult> {
 fn load_branch_inventory(
     repo: &Path,
     current_branch: Option<&str>,
+    default_branch: Option<&str>,
     worktree_branches: &HashSet<String>,
 ) -> Result<Vec<Branch>> {
     let lines = git_output(
@@ -324,7 +421,9 @@ fn load_branch_inventory(
 
     let mut branches = Vec::new();
     for line in lines.lines().filter(|line| !line.trim().is_empty()) {
-        let Some(branch) = parse_branch_line(line, current_branch, worktree_branches) else {
+        let Some(branch) =
+            parse_branch_line(line, current_branch, default_branch, worktree_branches)
+        else {
             continue;
         };
 
@@ -335,9 +434,174 @@ fn load_branch_inventory(
     Ok(branches)
 }
 
+fn build_closed_groups(
+    all_branches: &[Branch],
+    closed_mode_data: &ClosedModeData,
+    remote: &str,
+) -> Vec<CleanupGroup> {
+    let mut closed = Vec::new();
+    let mut merged = Vec::new();
+
+    for branch in all_branches {
+        if branch.protections.iter().any(|protection| {
+            matches!(
+                protection,
+                Protection::Main | Protection::Master | Protection::DefaultBranch
+            )
+        }) {
+            continue;
+        }
+
+        if branch.upstream_remote() != Some(remote) {
+            continue;
+        }
+
+        let Some(head_ref_name) = branch.upstream_branch_name() else {
+            continue;
+        };
+
+        let mut branch = branch.clone();
+        match closed_mode_data.pull_requests.get(head_ref_name) {
+            Some(pr) if pr.state == "OPEN" => continue,
+            Some(pr) if pr.state == "MERGED" => {
+                branch.detail = Some(format!("#{} merged · {} · {}", pr.number, pr.title, pr.url));
+                merged.push(branch);
+            }
+            Some(pr) if pr.state == "CLOSED" => {
+                branch.detail = Some(format!("#{} closed · {} · {}", pr.number, pr.title, pr.url));
+                closed.push(branch);
+            }
+            Some(pr) => {
+                branch.detail = Some(format!(
+                    "#{} {} · {} · {}",
+                    pr.number,
+                    pr.state.to_lowercase(),
+                    pr.title,
+                    pr.url
+                ));
+                closed.push(branch);
+            }
+            None => {
+                branch.detail = Some(String::from("no PR"));
+                closed.push(branch);
+            }
+        }
+    }
+
+    vec![
+        CleanupGroup::named(
+            CleanupMode::Closed,
+            "closed",
+            "closed pull request or no pull request on GitHub",
+            closed,
+        ),
+        CleanupGroup::named(
+            CleanupMode::Closed,
+            "merged",
+            "pull request merged but remote branch still exists",
+            merged,
+        ),
+    ]
+}
+
+fn load_closed_mode_data(repo: &Path, remote: &str) -> Result<ClosedModeData> {
+    ensure_remote_exists(repo, remote)?;
+    ensure_gh_installed()?;
+    ensure_gh_authenticated(repo)?;
+
+    let repo_view: RepoView = serde_json::from_str(&gh_output(
+        repo,
+        &["repo", "view", "--json", "defaultBranchRef"],
+    )?)?;
+    let pull_requests = serde_json::from_str::<Vec<PullRequestRecord>>(&gh_output(
+        repo,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--json",
+            "number,title,state,headRefName,url",
+            "--limit",
+            "1000",
+        ],
+    )?)?
+    .into_iter()
+    .fold(HashMap::new(), |mut index, pull_request| {
+        index
+            .entry(pull_request.head_ref_name.clone())
+            .or_insert(pull_request);
+        index
+    });
+
+    Ok(ClosedModeData {
+        default_branch: repo_view.default_branch_ref.name,
+        pull_requests,
+    })
+}
+
+fn delete_closed_branch(repo: &Path, remote: &str, branch: &Branch) -> DeleteResult {
+    let Some(remote_branch) = branch.upstream_branch_name() else {
+        return DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: String::from("branch has no remote tracking branch"),
+        };
+    };
+
+    match Command::new("git")
+        .args(["push", remote, &format!(":{remote_branch}")])
+        .current_dir(repo)
+        .output()
+    {
+        Ok(output) if output.status.success() => delete_local_branch(repo, branch),
+        Ok(output) => DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: command_message(&output),
+        },
+        Err(error) => DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: error.to_string(),
+        },
+    }
+}
+
+fn delete_local_branch(repo: &Path, branch: &Branch) -> DeleteResult {
+    match Command::new("git")
+        .args(["branch", "-D", &branch.name])
+        .current_dir(repo)
+        .output()
+    {
+        Ok(output) if output.status.success() => DeleteResult {
+            branch: branch.name.clone(),
+            success: true,
+            message: command_message(&output),
+        },
+        Ok(output) => DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: command_message(&output),
+        },
+        Err(error) => DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: error.to_string(),
+        },
+    }
+}
+
+fn command_message(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stderr.is_empty() { stdout } else { stderr }
+}
+
 fn parse_branch_line(
     line: &str,
     current_branch: Option<&str>,
+    default_branch: Option<&str>,
     worktree_branches: &HashSet<String>,
 ) -> Option<Branch> {
     let mut fields = line.split(FIELD_SEPARATOR);
@@ -364,6 +628,9 @@ fn parse_branch_line(
     if name == "master" {
         protections.push(Protection::Master);
     }
+    if default_branch == Some(name.as_str()) && name != "main" && name != "master" {
+        protections.push(Protection::DefaultBranch);
+    }
 
     Some(Branch {
         name,
@@ -371,6 +638,7 @@ fn parse_branch_line(
         upstream_track,
         relative_date,
         subject,
+        detail: None,
         protections,
         decision: Decision::Undecided,
     })
@@ -432,9 +700,68 @@ fn other_worktree_branches(repo: &Path, current_branch: Option<&str>) -> Result<
     Ok(branches)
 }
 
+fn ensure_remote_exists(repo: &Path, remote: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", remote])
+        .current_dir(repo)
+        .output()
+        .context("failed to inspect git remotes")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    bail!("remote `{remote}` does not exist")
+}
+
+fn ensure_gh_installed() -> Result<()> {
+    match Command::new("gh").args(["--version"]).output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(_) => bail!("gh CLI required for closed mode. Install from https://cli.github.com"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("gh CLI required for closed mode. Install from https://cli.github.com")
+        }
+        Err(error) => Err(error).context("failed to run gh --version"),
+    }
+}
+
+fn ensure_gh_authenticated(repo: &Path) -> Result<()> {
+    let output = Command::new("gh")
+        .args(["auth", "status"])
+        .current_dir(repo)
+        .output()
+        .context("failed to run gh auth status")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    bail!("Run `gh auth login` first")
+}
+
 fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
     let output = git_output_raw(repo, args)?;
     String::from_utf8(output.stdout).context("git returned non-utf8 output")
+}
+
+fn gh_output(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("gh")
+        .args(args)
+        .current_dir(repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
+
+    if !output.status.success() {
+        bail!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    String::from_utf8(output.stdout).context("gh returned non-utf8 output")
 }
 
 fn git_output_raw(repo: &Path, args: &[&str]) -> Result<Output> {
@@ -468,6 +795,7 @@ mod tests {
         let branch = parse_branch_line(
             "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
             Some("feature/foo"),
+            None,
             &HashSet::new(),
         )
         .expect("branch parsed");
@@ -483,6 +811,7 @@ mod tests {
         let branch = parse_branch_line(
             "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
             Some("main"),
+            None,
             &worktree_branches,
         )
         .expect("branch parsed");
@@ -495,6 +824,7 @@ mod tests {
     fn parse_branch_line_marks_main_branch_as_protected() {
         let branch = parse_branch_line(
             "main\u{1f}origin/main\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
+            None,
             None,
             &HashSet::new(),
         )
@@ -509,6 +839,7 @@ mod tests {
         let branch = parse_branch_line(
             "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
             None,
+            None,
             &HashSet::new(),
         )
         .expect("branch parsed");
@@ -521,6 +852,7 @@ mod tests {
     fn cleanup_mode_matches_unpushed_branches() {
         let branch = parse_branch_line(
             "feature/foo\u{1f}\u{1f}\u{1f}2 days ago\u{1f}test subject",
+            None,
             None,
             &HashSet::new(),
         )
@@ -535,14 +867,12 @@ mod tests {
         let branch = parse_branch_line(
             "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
             None,
+            None,
             &HashSet::new(),
         )
         .expect("branch parsed");
         let mut app = App::from_group(
-            CleanupGroup {
-                mode: CleanupMode::Gone,
-                branches: vec![branch],
-            },
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
             1,
             1,
         );
@@ -559,14 +889,12 @@ mod tests {
         let branch = parse_branch_line(
             "feature/foo\u{1f}origin/feature/foo\u{1f}[gone]\u{1f}2 days ago\u{1f}test subject",
             Some("feature/foo"),
+            None,
             &HashSet::new(),
         )
         .expect("branch parsed");
         let mut app = App::from_group(
-            CleanupGroup {
-                mode: CleanupMode::Gone,
-                branches: vec![branch],
-            },
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
             1,
             1,
         );

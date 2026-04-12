@@ -26,6 +26,8 @@ git-broom closed --batch         # print branch names to stdout
 git-broom closed --remote origin # specify remote (default: origin)
 ```
 
+`closed` may expand into more than one review group at runtime, for example a `closed` group for closed/no-PR branches and a `merged` group for merged PRs whose remote branch still exists.
+
 ### Detection logic
 
 1. Get all local branches with a remote tracking branch (from `git for-each-ref`)
@@ -52,6 +54,7 @@ Both local and remote — `git push origin :BRANCH` then `git branch -D`.
 - PR status: `#142 closed`, `#98 merged`, `no PR`
 - PR URL (shown in a detail line below the branch name)
 - Group affordance text explaining what `closed` means in the cleanup workflow
+- If `closed` includes more than one valid cleanup definition, split them into separate review groups instead of forcing them into one mixed list
 
 ### Pre-flight checks (beyond v1)
 
@@ -94,15 +97,15 @@ Same as v1/v2 plus:
 
 ## Acceptance Criteria
 
-- [ ] `git-broom closed` shows branches with closed/no PRs in TUI
-- [ ] PR status and URL shown per branch
-- [ ] Remote branch deleted first, then local
-- [ ] Graceful handling when `gh` is missing or unauthenticated
-- [ ] `--batch` and `--dry-run` work with `closed` mode
-- [ ] `closed` participates in the multi-group interactive workflow and grouped dry-run output
-- [ ] `--remote` flag to specify non-origin remote
-- [ ] Open PRs are excluded
-- [ ] Protected branches are excluded
+- [x] `git-broom closed` shows branches with closed/no PRs in TUI
+- [x] PR status and URL shown per branch
+- [x] Remote branch deleted first, then local
+- [x] Graceful handling when `gh` is missing or unauthenticated
+- [x] `--batch` and `--dry-run` work with `closed` mode
+- [x] `closed` participates in the multi-group interactive workflow and grouped dry-run output
+- [x] `--remote` flag to specify non-origin remote
+- [x] Open PRs are excluded
+- [x] Default branches are excluded; other protected branches remain visible but ineligible
 
 ## Risks
 

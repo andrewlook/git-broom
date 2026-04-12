@@ -33,7 +33,6 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .branches
         .iter()
         .map(|branch| render_branch(branch, content[1].width.saturating_sub(3) as usize))
-        .map(ListItem::new)
         .collect::<Vec<_>>();
 
     let list = List::new(items)
@@ -112,9 +111,9 @@ fn render_title(app: &App, width: usize) -> Line<'static> {
         "git-broom".len(),
         "   ".len(),
         "[".len(),
-        app.mode.name().len(),
+        app.group_name.len(),
         ": ".len(),
-        app.mode.description().len(),
+        app.group_description.len(),
         "]".len(),
     ];
     let left_width = left_segments.into_iter().sum::<usize>();
@@ -127,11 +126,14 @@ fn render_title(app: &App, width: usize) -> Line<'static> {
         Span::raw("   "),
         Span::styled("[", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            app.mode.name(),
+            app.group_name.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(": "),
-        Span::styled(app.mode.description(), Style::default().fg(Color::Gray)),
+        Span::styled(
+            app.group_description.clone(),
+            Style::default().fg(Color::Gray),
+        ),
         Span::styled("]", Style::default().fg(Color::DarkGray)),
         Span::raw(" ".repeat(spacer_width)),
         Span::styled(right_text, Style::default().fg(Color::Gray)),
@@ -151,7 +153,7 @@ fn right_aligned_header(label: &'static str, width: usize) -> Vec<Span<'static>>
     ]
 }
 
-fn render_branch(branch: &Branch, width: usize) -> Line<'static> {
+fn render_branch(branch: &Branch, width: usize) -> ListItem<'static> {
     let marker = match branch.decision {
         Decision::Delete => ("✗", Style::default().fg(Color::Red)),
         Decision::Undecided => ("·", Style::default().fg(Color::DarkGray)),
@@ -166,7 +168,7 @@ fn render_branch(branch: &Branch, width: usize) -> Line<'static> {
         line_style = line_style.fg(Color::DarkGray);
     }
 
-    let spans = vec![
+    let primary = Line::from(vec![
         Span::styled(format!("{} ", marker.0), marker.1),
         Span::styled(pad(&branch.display_name(), branch_width), line_style),
         Span::raw("  "),
@@ -181,9 +183,23 @@ fn render_branch(branch: &Branch, width: usize) -> Line<'static> {
         ),
         Span::raw("  "),
         Span::styled(left_pad(&branch.relative_date, age_width), line_style),
-    ];
+    ]);
 
-    Line::from(spans)
+    if let Some(detail) = &branch.detail {
+        let detail_width = width.saturating_sub(5);
+        let detail_style = line_style
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
+        return ListItem::new(vec![
+            primary,
+            Line::from(vec![
+                Span::raw("     "),
+                Span::styled(truncate(detail, detail_width), detail_style),
+            ]),
+        ]);
+    }
+
+    ListItem::new(vec![primary])
 }
 
 fn column_widths(width: usize) -> (usize, usize, usize) {
