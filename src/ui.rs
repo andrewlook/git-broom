@@ -13,18 +13,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
+    let title_width = chunks[0].width.saturating_sub(2) as usize;
     let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled(
-                format!("git-broom (step {}/{}): ", app.step_index, app.step_count),
-                Style::default(),
-            ),
-            Span::styled(
-                format!("{}: ", app.mode.name()),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(app.mode.description(), Style::default().fg(Color::Gray)),
-        ]))
+        .title(render_title(app, title_width))
         .borders(Borders::ALL);
     let inner = block.inner(chunks[0]);
     frame.render_widget(block, chunks[0]);
@@ -97,18 +88,67 @@ fn render_header(width: usize) -> Line<'static> {
     let row_prefix_width = 5;
     let (branch_width, commit_width, age_width) =
         column_widths(width.saturating_sub(row_prefix_width));
-    let header_style = Style::default()
-        .add_modifier(Modifier::BOLD)
-        .add_modifier(Modifier::UNDERLINED);
+    let mut spans = vec![
+        Span::raw(" ".repeat(row_prefix_width)),
+        Span::styled(
+            "branch name",
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
+        ),
+        Span::raw(" ".repeat(branch_width.saturating_sub("branch name".chars().count()))),
+        Span::raw("  "),
+    ];
+    spans.extend(right_aligned_header("last commit", commit_width));
+    spans.push(Span::raw("  "));
+    spans.extend(right_aligned_header("age", age_width));
+
+    Line::from(spans)
+}
+
+fn render_title(app: &App, width: usize) -> Line<'static> {
+    let left_segments = [
+        "  ".len(),
+        "git-broom".len(),
+        "   ".len(),
+        "[".len(),
+        app.mode.name().len(),
+        ": ".len(),
+        app.mode.description().len(),
+        "]".len(),
+    ];
+    let left_width = left_segments.into_iter().sum::<usize>();
+    let right_text = format!("({}/{})", app.step_index, app.step_count);
+    let spacer_width = width.saturating_sub(left_width + right_text.chars().count());
 
     Line::from(vec![
-        Span::raw(" ".repeat(row_prefix_width)),
-        Span::styled(pad("branch name", branch_width), header_style),
         Span::raw("  "),
-        Span::styled(left_pad("last commit", commit_width), header_style),
-        Span::raw("  "),
-        Span::styled(left_pad("age", age_width), header_style),
+        Span::styled("git-broom", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("   "),
+        Span::styled("[", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.mode.name(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(": "),
+        Span::styled(app.mode.description(), Style::default().fg(Color::Gray)),
+        Span::styled("]", Style::default().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(spacer_width)),
+        Span::styled(right_text, Style::default().fg(Color::Gray)),
     ])
+}
+
+fn right_aligned_header(label: &'static str, width: usize) -> Vec<Span<'static>> {
+    let padding = width.saturating_sub(label.chars().count());
+    vec![
+        Span::raw(" ".repeat(padding)),
+        Span::styled(
+            label,
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
+        ),
+    ]
 }
 
 fn render_branch(branch: &Branch, width: usize) -> Line<'static> {
@@ -129,7 +169,7 @@ fn render_branch(branch: &Branch, width: usize) -> Line<'static> {
     let spans = vec![
         Span::styled(format!("{} ", marker.0), marker.1),
         Span::styled(pad(&branch.display_name(), branch_width), line_style),
-        Span::styled("  ", line_style),
+        Span::raw("  "),
         Span::styled(
             left_pad(
                 &format!("\"{}\"", truncate(&branch.subject, commit_width)),
@@ -139,7 +179,7 @@ fn render_branch(branch: &Branch, width: usize) -> Line<'static> {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         ),
-        Span::styled("  ", line_style),
+        Span::raw("  "),
         Span::styled(left_pad(&branch.relative_date, age_width), line_style),
     ];
 
