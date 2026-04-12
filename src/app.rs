@@ -346,22 +346,24 @@ pub enum ScanProgress {
     ValidatingRepository,
     ReadingCurrentBranch,
     ReadingWorktrees,
+    SyncingRemoteRefs,
     LoadingLocalBranches,
     LoadingGithubData,
     MatchingClosedBranches,
 }
 
 impl ScanProgress {
-    pub const TOTAL_STEPS: usize = 6;
+    pub const TOTAL_STEPS: usize = 7;
 
     pub fn step(self) -> usize {
         match self {
             Self::ValidatingRepository => 1,
             Self::ReadingCurrentBranch => 2,
             Self::ReadingWorktrees => 3,
-            Self::LoadingLocalBranches => 4,
-            Self::LoadingGithubData => 5,
-            Self::MatchingClosedBranches => 6,
+            Self::SyncingRemoteRefs => 4,
+            Self::LoadingLocalBranches => 5,
+            Self::LoadingGithubData => 6,
+            Self::MatchingClosedBranches => 7,
         }
     }
 
@@ -370,6 +372,7 @@ impl ScanProgress {
             Self::ValidatingRepository => "validating repository",
             Self::ReadingCurrentBranch => "reading current branch",
             Self::ReadingWorktrees => "reading linked worktrees",
+            Self::SyncingRemoteRefs => "syncing remote refs",
             Self::LoadingLocalBranches => "loading local branches",
             Self::LoadingGithubData => "loading GitHub data",
             Self::MatchingClosedBranches => "matching branches against GitHub state",
@@ -402,6 +405,11 @@ where
 
     progress(ScanProgress::ReadingWorktrees, None);
     let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
+
+    if modes.contains(&CleanupMode::Closed) {
+        progress(ScanProgress::SyncingRemoteRefs, Some(remote));
+        fetch_prune_remote(repo, remote)?;
+    }
 
     progress(ScanProgress::LoadingLocalBranches, None);
     let mut all_branches =
@@ -514,6 +522,7 @@ fn closed_candidate_heads(branches: &[Branch], remote: &str) -> Vec<String> {
         .iter()
         .filter(|branch| {
             branch.upstream_remote() == Some(remote)
+                && !branch.upstream_track.contains("[gone]")
                 && !branch
                     .protections
                     .iter()
@@ -571,6 +580,9 @@ where
         }
 
         if branch.upstream_remote() != Some(remote) {
+            continue;
+        }
+        if branch.upstream_track.contains("[gone]") {
             continue;
         }
 
@@ -905,6 +917,24 @@ fn ensure_remote_exists(repo: &Path, remote: &str) -> Result<()> {
     bail!("remote `{remote}` does not exist")
 }
 
+fn fetch_prune_remote(repo: &Path, remote: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["fetch", remote, "--prune"])
+        .current_dir(repo)
+        .output()
+        .context("failed to sync remote refs")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    bail!(
+        "git fetch {} --prune failed: {}",
+        remote,
+        command_message(&output)
+    )
+}
+
 fn ensure_gh_installed() -> Result<()> {
     match Command::new("gh").args(["--version"]).output() {
         Ok(output) if output.status.success() => Ok(()),
@@ -1166,6 +1196,18 @@ mod tests {
                 pr_url: None,
                 detail: None,
                 protections: vec![Protection::Main],
+                decision: Decision::Undecided,
+            },
+            Branch {
+                name: String::from("feature/gone"),
+                upstream: Some(String::from("origin/feature/gone")),
+                upstream_track: String::from("[gone]"),
+                committed_at: 1_699_999_998,
+                relative_date: String::from("4 days ago"),
+                subject: String::from("gone"),
+                pr_url: None,
+                detail: None,
+                protections: Vec::new(),
                 decision: Decision::Undecided,
             },
         ];
