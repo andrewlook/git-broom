@@ -34,14 +34,11 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .iter()
         .enumerate()
         .map(|(index, branch)| {
-            let previous_section = index
-                .checked_sub(1)
-                .and_then(|previous| app.branches.get(previous))
-                .map(Branch::section);
+            let next_section = app.branches.get(index + 1).map(Branch::section);
             render_branch(
                 app,
                 branch,
-                previous_section,
+                next_section,
                 content[1].width.saturating_sub(3) as usize,
             )
         })
@@ -171,7 +168,7 @@ fn right_aligned_header(label: &'static str, width: usize) -> Vec<Span<'static>>
 fn render_branch(
     app: &App,
     branch: &Branch,
-    previous_section: Option<crate::app::BranchSection>,
+    next_section: Option<crate::app::BranchSection>,
     width: usize,
 ) -> ListItem<'static> {
     let marker = match branch.decision {
@@ -200,12 +197,7 @@ fn render_branch(
             .add_modifier(Modifier::ITALIC),
     };
 
-    let mut lines = Vec::new();
-    if previous_section.is_some() && previous_section != Some(branch.section()) {
-        lines.push(Line::from(""));
-    }
-
-    lines.push(Line::from(vec![
+    let mut lines = vec![Line::from(vec![
         Span::styled(format!("{} ", marker.0), marker.1),
         Span::styled(pad(&branch.display_name(), branch_width), line_style),
         Span::raw("  "),
@@ -218,7 +210,7 @@ fn render_branch(
         ),
         Span::raw("  "),
         Span::styled(left_pad(&branch.relative_date, age_width), line_style),
-    ]));
+    ])];
 
     if let Some(detail) = &branch.detail {
         let detail_width = width.saturating_sub(5);
@@ -229,6 +221,10 @@ fn render_branch(
             Span::raw("     "),
             Span::styled(truncate(detail, detail_width), detail_style),
         ]));
+    }
+
+    if next_section.is_some() && next_section != Some(branch.section()) {
+        lines.push(Line::from(""));
     }
 
     ListItem::new(lines)

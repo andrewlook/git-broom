@@ -301,6 +301,7 @@ impl App {
     }
 
     pub fn toggle_save(&mut self) {
+        let old_selected = self.selected;
         let Some(selected_name) = self
             .branches
             .get(self.selected)
@@ -311,19 +312,35 @@ impl App {
         let Some(branch) = self.branches.get_mut(self.selected) else {
             return;
         };
+        let was_saved = branch.saved;
 
         branch.saved = !branch.saved;
         branch.decision = Decision::Undecided;
 
         reorder_branches(&mut self.branches);
-        if let Some(index) = self
-            .branches
-            .iter()
-            .position(|branch| branch.name == selected_name)
+        if was_saved {
+            if let Some(index) = self
+                .branches
+                .iter()
+                .position(|branch| branch.name == selected_name)
+            {
+                self.selected = index;
+            } else {
+                self.selected = initial_selection(&self.branches);
+            }
+            return;
+        }
+
+        if let Some(index) = first_regular_from(&self.branches, old_selected)
+            .or_else(|| first_regular_from(&self.branches, 0))
         {
             self.selected = index;
         } else {
-            self.selected = initial_selection(&self.branches);
+            self.selected = self
+                .branches
+                .iter()
+                .position(|branch| branch.name == selected_name)
+                .unwrap_or_else(|| initial_selection(&self.branches));
         }
     }
 
@@ -724,9 +741,7 @@ fn reorder_branches(branches: &mut [Branch]) {
 }
 
 fn initial_selection(branches: &[Branch]) -> usize {
-    branches
-        .iter()
-        .position(|branch| branch.section() == BranchSection::Regular)
+    first_regular_from(branches, 0)
         .or_else(|| {
             branches
                 .iter()
@@ -738,6 +753,15 @@ fn initial_selection(branches: &[Branch]) -> usize {
                 .position(|branch| branch.section() == BranchSection::Protected)
         })
         .unwrap_or(0)
+}
+
+fn first_regular_from(branches: &[Branch], start: usize) -> Option<usize> {
+    branches
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, branch)| branch.section() == BranchSection::Regular)
+        .map(|(index, _)| index)
 }
 
 fn load_closed_mode_data<F>(
@@ -1367,7 +1391,8 @@ mod tests {
 
         assert_eq!(app.branches[0].name, "feature/second");
         assert!(app.branches[0].saved);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.branches[app.selected].name, "feature/first");
         assert_eq!(
             app.saved_branch_names(),
             vec![String::from("feature/second")]
