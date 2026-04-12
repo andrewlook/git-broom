@@ -168,6 +168,36 @@ fn dry_run_groups_closed_mode_by_reason() {
 }
 
 #[test]
+fn closed_mode_excludes_open_prs_found_via_head_search() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/open", "origin");
+    repo.create_remote_tracked_branch("feature/no-pr", "origin");
+
+    let fake_gh_dir = repo.install_fake_gh_with_head_search(
+        r#"[{"state":"OPEN","headRefName":"feature/open","url":"https://example.test/pr/open"}]"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["closed", "--dry-run"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&fake_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(!stdout.contains("feature/open"));
+    assert!(stdout.contains("feature/no-pr"));
+    assert!(stdout.contains("no PR"));
+}
+
+#[test]
 fn delete_closed_branch_removes_remote_then_local() {
     let repo = TestRepo::new();
     repo.create_remote_tracked_branch("feature/closed", "origin");
@@ -293,6 +323,22 @@ impl TestRepo {
         let script_path = bin_dir.join("gh");
         let script = format!(
             "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'gh version 999.0.0'\n  exit 0\nfi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"repo\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s' '{{\"defaultBranchRef\":{{\"name\":\"main\"}}}}'\n  exit 0\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  cat <<'EOF'\n{pr_list_json}\nEOF\n  exit 0\nfi\nprintf 'unexpected gh invocation: %s\\n' \"$*\" >&2\nexit 1\n"
+        );
+        fs::write(&script_path, script).expect("fake gh written");
+        let output = Command::new("chmod")
+            .args(["+x", script_path.to_str().expect("utf8 path")])
+            .output()
+            .expect("chmod runs");
+        assert!(output.status.success(), "chmod failed");
+        bin_dir
+    }
+
+    fn install_fake_gh_with_head_search(&self, head_search_json: &str) -> PathBuf {
+        let bin_dir = self.temp_path("fake-bin-head-search");
+        fs::create_dir_all(&bin_dir).expect("fake bin dir created");
+        let script_path = bin_dir.join("gh");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'gh version 999.0.0'\n  exit 0\nfi\nif [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then\n  exit 0\nfi\nif [ \"$1\" = \"repo\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s' '{{\"defaultBranchRef\":{{\"name\":\"main\"}}}}'\n  exit 0\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  case \"$*\" in\n    *feature/open*)\n      cat <<'EOF'\n{head_search_json}\nEOF\n      ;;\n    *)\n      printf '[]'\n      ;;\n  esac\n  exit 0\nfi\nprintf 'unexpected gh invocation: %s\\n' \"$*\" >&2\nexit 1\n"
         );
         fs::write(&script_path, script).expect("fake gh written");
         let output = Command::new("chmod")

@@ -339,6 +339,8 @@ struct ClosedModeData {
     pull_requests: HashMap<String, PullRequestRecord>,
 }
 
+const GH_HEAD_SEARCH_CHUNK_SIZE: usize = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanProgress {
     ValidatingRepository,
@@ -405,14 +407,11 @@ where
     let mut all_branches =
         load_branch_inventory(repo, current_branch.as_deref(), None, &worktree_branches)?;
 
-    let closed_branch_summary = summarize_closed_candidates(&all_branches, remote);
+    let closed_candidate_heads = closed_candidate_heads(&all_branches, remote);
 
     let closed_mode_data = if modes.contains(&CleanupMode::Closed) {
-        progress(
-            ScanProgress::LoadingGithubData,
-            closed_branch_summary.as_deref(),
-        );
-        let closed_mode_data = load_closed_mode_data(repo, remote)?;
+        let closed_mode_data =
+            load_closed_mode_data(repo, remote, &closed_candidate_heads, &mut progress)?;
         apply_default_branch_protection(&mut all_branches, &closed_mode_data.default_branch);
         Some(closed_mode_data)
     } else {
@@ -510,8 +509,8 @@ fn apply_default_branch_protection(branches: &mut [Branch], default_branch: &str
     }
 }
 
-fn summarize_closed_candidates(branches: &[Branch], remote: &str) -> Option<String> {
-    let candidate_names = branches
+fn closed_candidate_heads(branches: &[Branch], remote: &str) -> Vec<String> {
+    branches
         .iter()
         .filter(|branch| {
             branch.upstream_remote() == Some(remote)
@@ -520,20 +519,22 @@ fn summarize_closed_candidates(branches: &[Branch], remote: &str) -> Option<Stri
                     .iter()
                     .any(|protection| matches!(protection, Protection::Main | Protection::Master))
         })
-        .map(|branch| branch.name.as_str())
-        .collect::<Vec<_>>();
+        .filter_map(|branch| branch.upstream_branch_name().map(ToOwned::to_owned))
+        .collect()
+}
 
-    if candidate_names.is_empty() {
+fn chunk_summary(heads: &[String]) -> Option<String> {
+    if heads.is_empty() {
         return None;
     }
 
-    let preview = candidate_names
+    let preview = heads
         .iter()
         .take(3)
-        .copied()
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
-    let remaining = candidate_names.len().saturating_sub(3);
+    let remaining = heads.len().saturating_sub(3);
 
     if remaining == 0 {
         Some(preview)
@@ -614,7 +615,15 @@ where
     ]
 }
 
-fn load_closed_mode_data(repo: &Path, remote: &str) -> Result<ClosedModeData> {
+fn load_closed_mode_data<F>(
+    repo: &Path,
+    remote: &str,
+    candidate_heads: &[String],
+    progress: &mut F,
+) -> Result<ClosedModeData>
+where
+    F: FnMut(ScanProgress, Option<&str>),
+{
     ensure_remote_exists(repo, remote)?;
     ensure_gh_installed()?;
     ensure_gh_authenticated(repo)?;
@@ -622,31 +631,58 @@ fn load_closed_mode_data(repo: &Path, remote: &str) -> Result<ClosedModeData> {
         repo,
         &["repo", "view", "--json", "defaultBranchRef"],
     )?)?;
-    let pull_requests = serde_json::from_str::<Vec<PullRequestRecord>>(&gh_output(
-        repo,
-        &[
-            "pr",
-            "list",
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,headRefName,url",
-            "--limit",
-            "1000",
-        ],
-    )?)?
-    .into_iter()
-    .fold(HashMap::new(), |mut index, pull_request| {
-        index
-            .entry(pull_request.head_ref_name.clone())
-            .or_insert(pull_request);
-        index
-    });
+
+    let mut pull_requests = HashMap::new();
+    for chunk in candidate_heads.chunks(GH_HEAD_SEARCH_CHUNK_SIZE) {
+        let summary = chunk_summary(chunk);
+        progress(ScanProgress::LoadingGithubData, summary.as_deref());
+
+        let search = chunk
+            .iter()
+            .map(|head| format!("head:{head}"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let limit = (chunk.len() * 5).max(20).to_string();
+        let args = vec![
+            String::from("pr"),
+            String::from("list"),
+            String::from("--state"),
+            String::from("all"),
+            String::from("--search"),
+            search,
+            String::from("--json"),
+            String::from("state,headRefName,url"),
+            String::from("--limit"),
+            limit,
+        ];
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let records = serde_json::from_str::<Vec<PullRequestRecord>>(&gh_output(repo, &arg_refs)?)?;
+
+        for pull_request in records {
+            let head_ref_name = pull_request.head_ref_name.clone();
+            match pull_requests.get(&head_ref_name) {
+                Some(existing)
+                    if pull_request_rank(existing) >= pull_request_rank(&pull_request) => {}
+                _ => {
+                    pull_requests.insert(head_ref_name, pull_request);
+                }
+            }
+        }
+    }
 
     Ok(ClosedModeData {
         default_branch: repo_view.default_branch_ref.name,
         pull_requests,
     })
+}
+
+fn pull_request_rank(pull_request: &PullRequestRecord) -> usize {
+    match pull_request.state.as_str() {
+        "OPEN" => 3,
+        "MERGED" => 2,
+        "CLOSED" => 1,
+        _ => 0,
+    }
 }
 
 fn delete_closed_branch(repo: &Path, remote: &str, branch: &Branch) -> DeleteResult {
@@ -945,7 +981,7 @@ mod tests {
 
     use super::{
         App, Branch, CleanupGroup, CleanupMode, Decision, FIELD_SEPARATOR, Protection,
-        format_age_from_seconds, parse_branch_line, summarize_closed_candidates,
+        chunk_summary, closed_candidate_heads, format_age_from_seconds, parse_branch_line,
     };
 
     const SAMPLE_TIMESTAMP: &str = "1700000000";
@@ -1094,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn summarize_closed_candidates_lists_branch_names() {
+    fn closed_candidate_heads_filters_to_remote_tracked_branches() {
         let branches = vec![
             Branch {
                 name: String::from("feature/one"),
@@ -1135,8 +1171,25 @@ mod tests {
         ];
 
         assert_eq!(
-            summarize_closed_candidates(&branches, "origin"),
-            Some(String::from("feature/one, feature/two"))
+            closed_candidate_heads(&branches, "origin"),
+            vec![String::from("feature/one"), String::from("feature/two")]
+        );
+    }
+
+    #[test]
+    fn chunk_summary_shows_head_preview_and_remaining_count() {
+        let heads = vec![
+            String::from("feature/one"),
+            String::from("feature/two"),
+            String::from("feature/three"),
+            String::from("feature/four"),
+        ];
+
+        assert_eq!(
+            chunk_summary(&heads),
+            Some(String::from(
+                "feature/one, feature/two, feature/three (+1 more)"
+            ))
         );
     }
 }
