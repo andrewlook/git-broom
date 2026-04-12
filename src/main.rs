@@ -6,14 +6,17 @@ use std::process;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
+use crossterm::cursor::{MoveToColumn, MoveUp, RestorePosition, SavePosition};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
+use crossterm::style::{Attribute, Print, Stylize};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, size,
 };
 use git_broom::app::{
-    App, Branch, CleanupGroup, CleanupMode, DeleteResult, IMPLEMENTED_MODES, ScanProgress,
-    delete_branches, scan_selected_modes, scan_selected_modes_with_progress,
+    App, Branch, CleanupGroup, CleanupMode, IMPLEMENTED_MODES, ScanProgress, delete_branch,
+    scan_selected_modes, scan_selected_modes_with_progress,
 };
 use git_broom::keep_store::KeepStore;
 use ratatui::Terminal;
@@ -148,27 +151,34 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
                     continue;
                 }
 
-                println!(
-                    "About to run these cleanup commands for {} {} branches ({}):",
-                    branches_to_delete.len(),
-                    app.group_name,
-                    app.group_description
+                print_delete_review(
+                    &app.group_name,
+                    &app.group_description,
+                    app.mode,
+                    remote,
+                    &branches_to_delete,
                 );
-                for command in planned_delete_commands(app.mode, remote, &branches_to_delete) {
-                    println!("  {command}");
-                }
 
                 if !prompt_for_confirmation()? {
                     println!("Skipped {}.", app.group_name);
                     continue;
                 }
 
-                let (deleted, failed) = print_delete_results(
+                let (deleted, failed) = execute_delete_plan(
+                    repo,
                     &app.group_name,
-                    &delete_branches(repo, app.mode, remote, &branches_to_delete),
-                );
+                    app.mode,
+                    remote,
+                    &branches_to_delete,
+                )?;
                 total_deleted += deleted;
                 total_failed += failed;
+                if failed > 0 {
+                    println!(
+                        "Workflow complete. Deleted {total_deleted} branches. {total_failed} failed."
+                    );
+                    return Ok(());
+                }
             }
         }
     }
@@ -248,6 +258,34 @@ fn persist_saved_branches(repo: &Path, app: &App) -> Result<()> {
     keep_store.replace_mode(app.mode, app.saved_branch_names())
 }
 
+fn print_delete_review(
+    group_name: &str,
+    group_description: &str,
+    mode: CleanupMode,
+    remote: &str,
+    branches: &[&Branch],
+) {
+    let branch_label = branch_count_label(branches.len(), group_name);
+    if io::stdout().is_terminal() {
+        println!(
+            "About to run cleanup commands for {} {}:",
+            branch_label.bold(),
+            format!("({group_description})").italic().dark_grey()
+        );
+    } else {
+        println!("About to run cleanup commands for {branch_label} ({group_description}):");
+    }
+
+    println!();
+    for branch in branches {
+        println!(
+            "{}",
+            format_delete_command(mode, remote, branch, CommandLineState::Pending)
+        );
+    }
+    println!();
+}
+
 fn prompt_for_confirmation() -> Result<bool> {
     print!("Proceed? [y/N] ");
     io::stdout().flush()?;
@@ -257,43 +295,49 @@ fn prompt_for_confirmation() -> Result<bool> {
     Ok(matches!(input.trim(), "y" | "Y"))
 }
 
-fn print_delete_results(group_name: &str, results: &[DeleteResult]) -> (usize, usize) {
+fn execute_delete_plan(
+    repo: &Path,
+    group_name: &str,
+    mode: CleanupMode,
+    remote: &str,
+    branches: &[&Branch],
+) -> Result<(usize, usize)> {
+    let mut reporter = DeleteProgressReporter::new(mode, remote, branches)?;
     let mut deleted = 0;
     let mut failed = 0;
 
-    for result in results {
+    for (index, branch) in branches.iter().enumerate() {
+        reporter.update(index, branch, CommandLineState::Running)?;
+
+        let result = delete_branch(repo, mode, remote, branch);
         if result.success {
+            reporter.update(index, branch, CommandLineState::Success)?;
             deleted += 1;
-            println!("Deleted {}.", result.branch);
-        } else {
-            failed += 1;
-            println!("Failed to delete {}: {}", result.branch, result.message);
+            continue;
         }
+
+        reporter.update(index, branch, CommandLineState::Failed)?;
+        for (skipped_index, skipped_branch) in branches.iter().enumerate().skip(index + 1) {
+            reporter.update(skipped_index, skipped_branch, CommandLineState::Skipped)?;
+        }
+        reporter.finish()?;
+        failed += 1;
+        println!("Failed to delete {}: {}", result.branch, result.message);
+        println!(
+            "{group_name}: deleted {deleted} branches. {failed} failed. Aborted remaining cleanup commands."
+        );
+        return Ok((deleted, failed));
     }
 
+    reporter.finish()?;
     println!("{group_name}: deleted {deleted} branches. {failed} failed.");
 
-    (deleted, failed)
+    Ok((deleted, failed))
 }
 
-fn planned_delete_commands(mode: CleanupMode, remote: &str, branches: &[&Branch]) -> Vec<String> {
-    let mut commands = Vec::new();
-
-    for branch in branches {
-        if mode == CleanupMode::Closed
-            && let Some(remote_branch) = branch.upstream_branch_name()
-        {
-            commands.push(format!(
-                "git push {} :refs/heads/{}",
-                shell_quote(remote),
-                shell_quote(remote_branch),
-            ));
-        }
-
-        commands.push(format!("git branch -D {}", shell_quote(&branch.name)));
-    }
-
-    commands
+fn branch_count_label(count: usize, group_name: &str) -> String {
+    let noun = if count == 1 { "branch" } else { "branches" };
+    format!("{count} {group_name} {noun}")
 }
 
 fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<String> {
@@ -486,6 +530,158 @@ fn shell_quote(value: &str) -> String {
     }
 
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandLineState {
+    Pending,
+    Running,
+    Success,
+    Failed,
+    Skipped,
+}
+
+fn format_delete_command(
+    mode: CleanupMode,
+    remote: &str,
+    branch: &Branch,
+    state: CommandLineState,
+) -> String {
+    let local_command = format!("git branch -D {}", shell_quote(&branch.name));
+    let plain = match mode {
+        CleanupMode::Closed => match branch.upstream_branch_name() {
+            Some(remote_branch) => format!(
+                "git push {} :refs/heads/{} && {}",
+                shell_quote(remote),
+                shell_quote(remote_branch),
+                local_command
+            ),
+            None => local_command.clone(),
+        },
+        _ => local_command.clone(),
+    };
+
+    if !io::stdout().is_terminal() {
+        return match state {
+            CommandLineState::Pending => format!("  {plain}"),
+            CommandLineState::Running => format!("> {plain}"),
+            CommandLineState::Success => format!("✓ {plain}"),
+            CommandLineState::Failed => format!("x {plain}"),
+            CommandLineState::Skipped => format!("- {plain}"),
+        };
+    }
+
+    let prefix = match state {
+        CommandLineState::Pending => "  ".to_string(),
+        CommandLineState::Running => format!("{} ", ">".yellow().bold()),
+        CommandLineState::Success => format!("{} ", "✓".green().bold()),
+        CommandLineState::Failed => format!("{} ", "x".red().bold()),
+        CommandLineState::Skipped => format!("{} ", "-".dark_grey()),
+    };
+
+    let styled_command = match state {
+        CommandLineState::Success => format!(
+            "{}",
+            plain.as_str().dark_grey().attribute(Attribute::CrossedOut)
+        ),
+        CommandLineState::Skipped => format!("{}", plain.as_str().dark_grey()),
+        _ => styled_delete_segments(mode, remote, branch, &local_command),
+    };
+
+    format!("{prefix}{styled_command}")
+}
+
+fn styled_delete_segments(
+    mode: CleanupMode,
+    remote: &str,
+    branch: &Branch,
+    local_command: &str,
+) -> String {
+    match mode {
+        CleanupMode::Closed => match branch.upstream_branch_name() {
+            Some(remote_branch) => format!(
+                "{}{}{}",
+                format!(
+                    "git push {} :refs/heads/{}",
+                    shell_quote(remote),
+                    shell_quote(remote_branch)
+                )
+                .red()
+                .bold(),
+                " && ".dark_grey(),
+                local_command.yellow(),
+            ),
+            None => format!("{}", local_command.yellow()),
+        },
+        _ => format!("{}", local_command.yellow()),
+    }
+}
+
+struct DeleteProgressReporter {
+    enabled: bool,
+    line_count: usize,
+    mode: CleanupMode,
+    remote: String,
+}
+
+impl DeleteProgressReporter {
+    fn new(mode: CleanupMode, remote: &str, branches: &[&Branch]) -> Result<Self> {
+        let enabled = io::stdout().is_terminal();
+        if !enabled {
+            return Ok(Self {
+                enabled,
+                line_count: branches.len(),
+                mode,
+                remote: remote.to_string(),
+            });
+        }
+
+        println!();
+        for branch in branches {
+            println!(
+                "{}",
+                format_delete_command(mode, remote, branch, CommandLineState::Pending)
+            );
+        }
+
+        execute!(io::stdout(), SavePosition)?;
+        Ok(Self {
+            enabled,
+            line_count: branches.len(),
+            mode,
+            remote: remote.to_string(),
+        })
+    }
+
+    fn update(&mut self, index: usize, branch: &Branch, state: CommandLineState) -> Result<()> {
+        if !self.enabled {
+            println!(
+                "{}",
+                format_delete_command(self.mode, &self.remote, branch, state)
+            );
+            return Ok(());
+        }
+
+        let line = format_delete_command(self.mode, &self.remote, branch, state);
+        let lines_up = self.line_count.saturating_sub(index) as u16;
+        execute!(
+            io::stdout(),
+            RestorePosition,
+            MoveToColumn(0),
+            MoveUp(lines_up),
+            Clear(ClearType::CurrentLine),
+            Print(line),
+        )?;
+        io::stdout().flush()?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if self.enabled {
+            execute!(io::stdout(), RestorePosition, MoveToColumn(0))?;
+        }
+        Ok(())
+    }
 }
 
 fn truncate(value: &str, width: usize) -> String {
@@ -704,8 +900,8 @@ mod tests {
     use git_broom::app::{Branch, CleanupGroup, CleanupMode, Decision};
 
     use super::{
-        OutputMode, fit_for_column, format_preview_lines, is_immediate_exit, parse_cli,
-        planned_delete_commands, shell_quote,
+        CommandLineState, OutputMode, fit_for_column, format_delete_command, format_preview_lines,
+        is_immediate_exit, parse_cli, shell_quote,
     };
 
     fn sample_branch(name: &str) -> Branch {
@@ -874,16 +1070,18 @@ mod tests {
     }
 
     #[test]
-    fn planned_delete_commands_include_remote_and_local_cleanup_for_closed_mode() {
+    fn format_delete_command_combines_remote_and_local_cleanup_for_closed_mode() {
         let branch = sample_branch("feature/closed");
-        let commands = planned_delete_commands(CleanupMode::Closed, "origin", &[&branch]);
+        let command = format_delete_command(
+            CleanupMode::Closed,
+            "origin",
+            &branch,
+            CommandLineState::Pending,
+        );
 
         assert_eq!(
-            commands,
-            vec![
-                String::from("git push origin :refs/heads/feature/closed"),
-                String::from("git branch -D feature/closed"),
-            ]
+            command,
+            "  git push origin :refs/heads/feature/closed && git branch -D feature/closed"
         );
     }
 

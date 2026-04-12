@@ -552,16 +552,30 @@ pub fn delete_branches(
     remote: &str,
     branches: &[&Branch],
 ) -> Vec<DeleteResult> {
-    branches
-        .iter()
-        .map(|branch| {
-            if mode == CleanupMode::Closed {
-                delete_closed_branch(repo, remote, branch)
-            } else {
-                delete_local_branch(repo, branch)
-            }
-        })
-        .collect()
+    let mut results = Vec::new();
+    for branch in branches {
+        let result = delete_branch(repo, mode, remote, branch);
+        let should_stop = !result.success;
+        results.push(result);
+        if should_stop {
+            break;
+        }
+    }
+
+    results
+}
+
+pub fn delete_branch(
+    repo: &Path,
+    mode: CleanupMode,
+    remote: &str,
+    branch: &Branch,
+) -> DeleteResult {
+    if mode == CleanupMode::Closed {
+        delete_closed_branch(repo, remote, branch)
+    } else {
+        delete_local_branch(repo, branch)
+    }
 }
 
 fn load_branch_inventory(
