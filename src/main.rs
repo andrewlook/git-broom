@@ -571,7 +571,14 @@ fn format_group_header(
 fn format_preview_column_header(label: &str, width: usize) -> String {
     let padded = left_pad(label, width);
     if io::stdout().is_terminal() {
-        format!("{}", padded.as_str().bold().underlined())
+        let trimmed = padded.trim_start();
+        let padding = " ".repeat(
+            padded
+                .chars()
+                .count()
+                .saturating_sub(trimmed.chars().count()),
+        );
+        format!("{padding}{}", trimmed.bold().underlined())
     } else {
         padded
     }
@@ -595,7 +602,16 @@ fn style_secondary_preview(branch: &Branch, mode: CleanupMode, value: &str) -> S
     }
 
     match mode {
-        CleanupMode::Closed if branch.pr_url.is_some() => format!("{}", value.blue().underlined()),
+        CleanupMode::Closed if branch.pr_url.is_some() => {
+            let trimmed = value.trim_start();
+            let padding = " ".repeat(
+                value
+                    .chars()
+                    .count()
+                    .saturating_sub(trimmed.chars().count()),
+            );
+            format!("{padding}{}", trimmed.blue().underlined())
+        }
         CleanupMode::Closed => format!("{}", value.dark_grey()),
         _ => match branch.section() {
             git_broom::app::BranchSection::Protected => format!("{}", value.dark_grey().italic()),
