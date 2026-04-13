@@ -59,7 +59,10 @@ fn run() -> Result<()> {
 
     match cli.intent {
         CliIntent::Preview => run_preview(&outcome),
-        CliIntent::Clean => run_interactive(&repo, &cli.remote, outcome.groups),
+        CliIntent::Clean => {
+            print_scan_notes(&outcome.notes);
+            run_interactive(&repo, &cli.remote, outcome.groups)
+        }
     }
 }
 
@@ -245,17 +248,22 @@ fn run_preview(outcome: &ScanOutcome) -> Result<()> {
         println!("No branches found for selected cleanup groups.");
     }
 
-    if !outcome.notes.is_empty() {
-        if !outcome.groups.is_empty() {
-            println!();
-        }
+    if !outcome.notes.is_empty() && !outcome.groups.is_empty() {
+        println!();
+    }
+    print_scan_notes(&outcome.notes);
 
-        for note in &outcome.notes {
+    Ok(())
+}
+
+fn print_scan_notes(notes: &[String]) {
+    for note in notes {
+        if io::stdout().is_terminal() {
+            println!("{} {}", "Note:".yellow().bold(), note.as_str().dark_grey());
+        } else {
             println!("Note: {note}");
         }
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,22 +423,11 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
         step_index += 1;
         let (branch_width, secondary_width, age_width) =
             preview_column_widths(group.mode, available_width);
-        let total_width = preview_total_width(branch_width, secondary_width, age_width);
-        lines.push(format_preview_title(
-            &group.name,
-            &group.description,
+        lines.push(format_preview_header(
+            group,
+            group.mode,
             step_index,
             step_count,
-            total_width,
-        ));
-        lines.push(format_preview_header(
-            group.mode,
-            branch_width,
-            secondary_width,
-            age_width,
-        ));
-        lines.push(format_preview_rule(
-            group.mode,
             branch_width,
             secondary_width,
             age_width,
@@ -460,54 +457,27 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
     lines
 }
 
-fn format_preview_title(
-    group_name: &str,
-    group_description: &str,
+fn format_preview_header(
+    group: &CleanupGroup,
+    mode: CleanupMode,
     step_index: usize,
     step_count: usize,
-    total_width: usize,
-) -> String {
-    let left = format!("  git-broom   [{group_name}: {group_description}]");
-    let right = format!("({step_index}/{step_count})");
-    let spacer_width = total_width.saturating_sub(left.chars().count() + right.chars().count());
-
-    format!("{left}{}{right}", " ".repeat(spacer_width.max(1)))
-}
-
-fn format_preview_header(
-    mode: CleanupMode,
     branch_width: usize,
     secondary_width: usize,
     age_width: usize,
 ) -> String {
     let secondary_label = secondary_column_label(mode);
-    format!(
-        "  {}  {}  {}",
-        pad("branch name", branch_width),
-        left_pad(secondary_label, secondary_width),
-        left_pad("age", age_width),
-    )
-}
+    let group_header = format_group_header(
+        &group.name,
+        &group.description,
+        step_index,
+        step_count,
+        branch_width,
+    );
+    let secondary_header = format_preview_column_header(secondary_label, secondary_width);
+    let age_header = format_preview_column_header("age", age_width);
 
-fn format_preview_rule(
-    mode: CleanupMode,
-    branch_width: usize,
-    secondary_width: usize,
-    age_width: usize,
-) -> String {
-    let secondary_label = secondary_column_label(mode);
-    format!(
-        "  {}  {}  {}",
-        pad(
-            "-".repeat("branch name".chars().count()).as_str(),
-            branch_width
-        ),
-        left_pad(
-            "-".repeat(secondary_label.chars().count()).as_str(),
-            secondary_width
-        ),
-        left_pad("-".repeat("age".chars().count()).as_str(), age_width),
-    )
+    format!("  {group_header}  {secondary_header}  {age_header}")
 }
 
 fn format_preview_branch(
@@ -518,14 +488,17 @@ fn format_preview_branch(
     age_width: usize,
 ) -> Vec<String> {
     let secondary_value = secondary_column_value(branch, mode);
+    let branch_value = pad(&branch.display_name(), branch_width);
+    let secondary_padded = left_pad(
+        &truncate(&secondary_value, secondary_width),
+        secondary_width,
+    );
+    let age_padded = left_pad(&branch.relative_date, age_width);
     let mut lines = vec![format!(
         "  {}  {}  {}",
-        pad(&branch.display_name(), branch_width),
-        left_pad(
-            &truncate(&secondary_value, secondary_width),
-            secondary_width
-        ),
-        left_pad(&branch.relative_date, age_width),
+        style_branch_preview(branch, &branch_value),
+        style_secondary_preview(branch, mode, &secondary_padded),
+        style_age_preview(branch, &age_padded),
     )];
 
     if let Some(detail) = &branch.detail {
@@ -555,6 +528,103 @@ fn preview_width() -> usize {
         size().map(|(width, _)| width as usize).unwrap_or(80)
     } else {
         80
+    }
+}
+
+fn format_group_header(
+    group_name: &str,
+    group_description: &str,
+    step_index: usize,
+    step_count: usize,
+    width: usize,
+) -> String {
+    let plain = format!("{group_name} ({group_description}) [{step_index}/{step_count}]");
+    if !io::stdout().is_terminal() {
+        return pad(&plain, width);
+    }
+
+    let visible_width = plain.chars().count();
+    if visible_width > width {
+        return format!(
+            "{}",
+            pad(&plain, width)
+                .as_str()
+                .bold()
+                .with(group_header_color(group_name))
+        );
+    }
+
+    let padding = " ".repeat(width.saturating_sub(visible_width));
+    format!(
+        "{} {} {}{}",
+        group_name
+            .to_ascii_uppercase()
+            .as_str()
+            .bold()
+            .with(group_header_color(group_name)),
+        format!("({group_description})").dark_grey(),
+        format!("[{step_index}/{step_count}]").dark_grey(),
+        padding
+    )
+}
+
+fn format_preview_column_header(label: &str, width: usize) -> String {
+    let padded = left_pad(label, width);
+    if io::stdout().is_terminal() {
+        format!("{}", padded.as_str().bold().underlined())
+    } else {
+        padded
+    }
+}
+
+fn style_branch_preview(branch: &Branch, value: &str) -> String {
+    if !io::stdout().is_terminal() {
+        return value.to_string();
+    }
+
+    match branch.section() {
+        git_broom::app::BranchSection::Protected => format!("{}", value.dark_grey()),
+        git_broom::app::BranchSection::Saved => format!("{}", value.green()),
+        git_broom::app::BranchSection::Regular => value.to_string(),
+    }
+}
+
+fn style_secondary_preview(branch: &Branch, mode: CleanupMode, value: &str) -> String {
+    if !io::stdout().is_terminal() {
+        return value.to_string();
+    }
+
+    match mode {
+        CleanupMode::Closed if branch.pr_url.is_some() => format!("{}", value.blue().underlined()),
+        CleanupMode::Closed => format!("{}", value.dark_grey()),
+        _ => match branch.section() {
+            git_broom::app::BranchSection::Protected => format!("{}", value.dark_grey().italic()),
+            git_broom::app::BranchSection::Saved => format!("{}", value.green().italic()),
+            git_broom::app::BranchSection::Regular => format!("{}", value.dark_grey().italic()),
+        },
+    }
+}
+
+fn style_age_preview(branch: &Branch, value: &str) -> String {
+    if !io::stdout().is_terminal() {
+        return value.to_string();
+    }
+
+    match branch.section() {
+        git_broom::app::BranchSection::Protected => format!("{}", value.dark_grey()),
+        git_broom::app::BranchSection::Saved => format!("{}", value.green()),
+        git_broom::app::BranchSection::Regular => value.to_string(),
+    }
+}
+
+fn group_header_color(group_name: &str) -> crossterm::style::Color {
+    match group_name {
+        "gone" => crossterm::style::Color::Red,
+        "unpushed" => crossterm::style::Color::Yellow,
+        "closed" => crossterm::style::Color::Blue,
+        "no-pr" => crossterm::style::Color::DarkYellow,
+        "merged" => crossterm::style::Color::Green,
+        _ => crossterm::style::Color::White,
     }
 }
 
@@ -812,8 +882,9 @@ Cleanup groups:
   gone       Upstream branch no longer exists on the remote.
   unpushed   Local branch has no upstream tracking branch configured.
   closed     Remote-tracked branch has a closed or missing GitHub PR.
-             This can expand into two review groups:
-             - closed: closed PR or no PR
+             This can expand into three review groups:
+             - closed: closed PR
+             - no-pr: no PR found
              - merged: PR merged but remote branch still exists
 
 How it works:
@@ -1084,22 +1155,20 @@ mod tests {
                     vec![sample_branch("feature/local-only")],
                 ),
             ],
-            80,
+            200,
         );
 
-        assert!(lines[0].starts_with("  git-broom   [gone: upstream branch no longer exists]"));
-        assert!(lines[0].ends_with("(1/2)"));
-        assert!(lines[1].contains("branch name"));
-        assert!(lines[2].contains("-----------"));
-        assert!(lines[3].contains("feature/delete-me"));
+        let first_header = lines[0].to_lowercase();
+        let second_header = lines[3].to_lowercase();
+
+        assert!(first_header.contains("gone (upstream branch no longer exists) [1/2]"));
+        assert!(lines[0].contains("last commit"));
+        assert!(lines[0].contains("age"));
+        assert!(lines[1].contains("feature/delete-me"));
         assert!(
-            lines[5]
-                .starts_with("  git-broom   [unpushed: no upstream tracking branch is configured]")
+            second_header.contains("unpushed (no upstream tracking branch is configured) [2/2]")
         );
-        assert!(lines[5].ends_with("(2/2)"));
-        assert!(lines[6].contains("branch name"));
-        assert!(lines[7].contains("-----------"));
-        assert!(lines[8].contains("feature/local-only"));
+        assert!(lines[4].contains("feature/local-only"));
     }
 
     #[test]
@@ -1142,14 +1211,19 @@ mod tests {
             &[CleanupGroup::named(
                 CleanupMode::Closed,
                 "closed",
-                "closed pull request or no pull request on GitHub",
+                "pull request closed on GitHub",
                 vec![branch],
             )],
-            120,
+            200,
         );
 
-        assert!(lines[1].contains("pull request"));
-        assert!(lines[3].contains("https://example.test/pr/1"));
+        assert!(
+            lines[0]
+                .to_lowercase()
+                .contains("closed (pull request closed on github) [1/1]")
+        );
+        assert!(lines[0].contains("pull request"));
+        assert!(lines[1].contains("https://example.test/pr/1"));
     }
 
     #[test]

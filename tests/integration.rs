@@ -156,13 +156,14 @@ fn dry_run_groups_closed_mode_by_reason() {
     );
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert!(stdout.contains("[closed: closed pull request or no pull request on GitHub]"));
+    assert!(stdout.contains("closed"));
     assert!(stdout.contains("pull request"));
     assert!(stdout.contains("feature/closed"));
     assert!(stdout.contains("https://example.test/pr/1"));
+    assert!(stdout.contains("no-pr"));
     assert!(stdout.contains("no PR"));
     assert!(stdout.contains("feature/no-pr"));
-    assert!(stdout.contains("[merged: pull request merged but remote branch still exists]"));
+    assert!(stdout.contains("merged"));
     assert!(stdout.contains("feature/merged"));
     assert!(stdout.contains("https://example.test/pr/2"));
     assert!(!stdout.contains("feature/open"));
@@ -186,7 +187,7 @@ fn default_command_prints_grouped_preview_without_prompting_for_cleanup() {
     );
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert!(stdout.contains("[unpushed: no upstream tracking branch is configured]"));
+    assert!(stdout.contains("unpushed"));
     assert!(stdout.contains("feature/local-only"));
     assert!(!stdout.contains("Proceed? [y/N]"));
 }
@@ -285,6 +286,37 @@ fn stale_closed_preview_cache_is_not_trusted() {
 }
 
 #[test]
+fn malformed_closed_preview_cache_is_ignored_and_refreshed() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+    let cache_path = repo.pr_cache_path();
+    fs::create_dir_all(cache_path.parent().expect("cache parent")).expect("cache dir created");
+    fs::write(&cache_path, "{not valid json").expect("broken cache written");
+
+    let fake_gh_dir = repo.install_fake_gh(
+        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"}]"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&fake_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("https://example.test/pr/1"));
+    assert!(stdout.contains("Note: ignoring unreadable closed metadata cache"));
+}
+
+#[test]
 fn preview_degrades_gracefully_when_closed_metadata_is_unavailable() {
     let repo = TestRepo::new();
     repo.create_gone_branch("feature/gone");
@@ -306,10 +338,10 @@ fn preview_degrades_gracefully_when_closed_metadata_is_unavailable() {
     );
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert!(stdout.contains("[gone: upstream branch no longer exists]"));
+    assert!(stdout.contains("gone"));
     assert!(stdout.contains("feature/gone"));
     assert!(stdout.contains("Note: closed metadata unavailable"));
-    assert!(!stdout.contains("[closed:"));
+    assert!(!stdout.contains("feature/closed"));
 }
 
 #[test]

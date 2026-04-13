@@ -465,7 +465,7 @@ struct ClosedModeData {
 #[derive(Debug, Clone)]
 struct ClosedModeResolution {
     data: Option<ClosedModeData>,
-    note: Option<String>,
+    notes: Vec<String>,
 }
 
 const GH_HEAD_SEARCH_CHUNK_SIZE: usize = 20;
@@ -620,9 +620,8 @@ where
     }
 
     let notes = closed_resolution
-        .and_then(|resolution| resolution.note)
-        .into_iter()
-        .collect();
+        .map(|resolution| resolution.notes)
+        .unwrap_or_default();
 
     Ok(ScanOutcome { groups, notes })
 }
@@ -752,6 +751,7 @@ where
     F: FnMut(ScanProgress, Option<&str>),
 {
     let mut closed = Vec::new();
+    let mut no_pr = Vec::new();
     let mut merged = Vec::new();
 
     for branch in all_branches {
@@ -796,7 +796,7 @@ where
                 closed.push(branch);
             }
             None => {
-                closed.push(branch);
+                no_pr.push(branch);
             }
         }
     }
@@ -805,8 +805,14 @@ where
         CleanupGroup::named(
             CleanupMode::Closed,
             "closed",
-            "closed pull request or no pull request on GitHub",
+            "pull request closed on GitHub",
             closed,
+        ),
+        CleanupGroup::named(
+            CleanupMode::Closed,
+            "no-pr",
+            "no pull request found on GitHub",
+            no_pr,
         ),
         CleanupGroup::named(
             CleanupMode::Closed,
@@ -873,49 +879,72 @@ where
         ScanIntent::Clean => {
             let closed_mode_data =
                 refresh_closed_mode_data(repo, remote, candidate_heads, progress)?;
-            persist_closed_mode_cache(repo, remote, &closed_mode_data)?;
+            let mut notes = Vec::new();
+            if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
+                notes.push(format!("failed to update closed metadata cache: {error:#}"));
+            }
             Ok(ClosedModeResolution {
                 data: Some(closed_mode_data),
-                note: None,
+                notes,
             })
         }
         ScanIntent::Preview => {
-            if let Some(closed_mode_data) = load_fresh_closed_mode_cache(repo, remote)? {
-                return Ok(ClosedModeResolution {
-                    data: Some(closed_mode_data),
-                    note: None,
-                });
+            let mut notes = Vec::new();
+            match load_fresh_closed_mode_cache(repo, remote)? {
+                CacheLoad::Fresh(closed_mode_data) => {
+                    return Ok(ClosedModeResolution {
+                        data: Some(closed_mode_data),
+                        notes,
+                    });
+                }
+                CacheLoad::Unavailable(note) => notes.push(note),
+                CacheLoad::Missing => {}
             }
 
             match refresh_closed_mode_data(repo, remote, candidate_heads, progress) {
                 Ok(closed_mode_data) => {
-                    persist_closed_mode_cache(repo, remote, &closed_mode_data)?;
+                    if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
+                        notes.push(format!("failed to update closed metadata cache: {error:#}"));
+                    }
                     Ok(ClosedModeResolution {
                         data: Some(closed_mode_data),
-                        note: None,
+                        notes,
                     })
                 }
-                Err(error) => Ok(ClosedModeResolution {
-                    data: None,
-                    note: Some(format!("closed metadata unavailable: {error:#}")),
-                }),
+                Err(error) => {
+                    notes.push(format!("closed metadata unavailable: {error:#}"));
+                    Ok(ClosedModeResolution { data: None, notes })
+                }
             }
         }
     }
 }
 
-fn load_fresh_closed_mode_cache(repo: &Path, remote: &str) -> Result<Option<ClosedModeData>> {
+enum CacheLoad {
+    Fresh(ClosedModeData),
+    Missing,
+    Unavailable(String),
+}
+
+fn load_fresh_closed_mode_cache(repo: &Path, remote: &str) -> Result<CacheLoad> {
     let remote_url = remote_url(repo, remote)?;
-    let cache = PrCache::load(repo)?;
+    let cache = match PrCache::load(repo) {
+        Ok(cache) => cache,
+        Err(error) => {
+            return Ok(CacheLoad::Unavailable(format!(
+                "ignoring unreadable closed metadata cache: {error:#}"
+            )));
+        }
+    };
     let Some(entry) = cache.remote_entry(remote, &remote_url) else {
-        return Ok(None);
+        return Ok(CacheLoad::Missing);
     };
 
     if !pr_cache_is_fresh(entry.refreshed_at) {
-        return Ok(None);
+        return Ok(CacheLoad::Missing);
     }
 
-    Ok(Some(closed_mode_data_from_cache(entry)))
+    Ok(CacheLoad::Fresh(closed_mode_data_from_cache(entry)))
 }
 
 fn persist_closed_mode_cache(repo: &Path, remote: &str, data: &ClosedModeData) -> Result<()> {

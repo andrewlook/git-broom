@@ -49,11 +49,11 @@ cargo run -- --groups closed --remote upstream
 cargo run -- --groups gone --batch
 ```
 
-`closed` mode can expand into more than one review group, for example a `closed` group for closed/no-PR branches and a `merged` group for merged PRs whose remote branch still exists.
+`closed` mode can expand into more than one review group, for example separate `closed`, `no-pr`, and `merged` groups.
 
 Saved branches are cached locally under the repo's git metadata directory, not in tracked files. In a normal clone that path is `.git/git-broom/keep-labels.json`; in worktree setups it resolves through the shared git common dir.
 
-Closed-mode preview also caches GitHub PR metadata locally at `.git/git-broom/pr-cache.json`. That cache speeds up repeated preview runs, but `git-broom clean closed` refreshes GitHub data before destructive review so cleanup does not rely on stale PR metadata.
+Closed-mode preview also caches GitHub PR metadata locally at `.git/git-broom/pr-cache.json`. That cache speeds up repeated preview runs, but `git-broom clean --groups closed` refreshes GitHub data before destructive review so cleanup does not rely on stale PR metadata.
 
 Within each review group, branches are shown in this order:
 
