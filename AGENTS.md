@@ -2,8 +2,9 @@
 
 ## Repo Shape
 
-- `src/main.rs`: CLI parsing, output-mode dispatch, terminal lifecycle
+- `src/main.rs`: CLI parsing, preview vs clean dispatch, terminal lifecycle
 - `src/app.rs`: branch scanning, cleanup-group construction, protections, delete decisions
+- `src/pr_cache.rs`: repo-local closed-mode PR metadata cache
 - `src/ui.rs`: ratatui rendering for the interactive review flow
 - `tests/integration.rs`: temp-repo integration coverage
 - `docs/plans/`: active plans
@@ -23,11 +24,15 @@ Current learnings:
 ## Product Preferences
 
 - Favor human-readable output over script-oriented output unless machine-readability is an explicit requirement.
-- Treat `--dry-run` and `--batch` as previews of the interactive workflow, not separate reporting surfaces.
-- Keep destructive flows step-based when there are multiple cleanup modes. Review one group at a time and confirm per group.
+- Treat preview as the default product surface. `git-broom clean` is the only destructive entrypoint.
+- Treat `--dry-run` and `--batch` as compatibility aliases for the default preview, not separate reporting surfaces.
+- Keep destructive flows step-based when there are multiple cleanup groups. Review one group at a time and confirm per group.
+- The CLI hierarchy is `git-broom` vs `git-broom clean`, with `-g/--groups` selecting subsets like `gone,unpushed`.
 - Keep protected branches visible in previews and interactive review. Label them inline instead of silently filtering them out.
 - When a protected branch is selected for deletion, explain why it is ineligible instead of ignoring the action.
 - Persistent saved/keep labels live under the git common dir at `git-broom/keep-labels.json`, not in tracked files.
+- Closed-mode preview metadata lives under the git common dir at `git-broom/pr-cache.json`.
+- Preview may use cached GitHub PR metadata when it is fresh; `clean` must refresh closed-mode metadata before destructive review.
 - Preserve parity between interactive and non-interactive modes:
   - same group order
   - same mode/explainer text

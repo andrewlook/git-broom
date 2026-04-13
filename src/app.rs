@@ -7,14 +7,53 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use crate::keep_store::KeepStore;
+use crate::pr_cache::{CachedPullRequestRecord, PrCache, PrCacheRemoteEntry};
 
 const FIELD_SEPARATOR: char = '\u{1f}';
+const PR_CACHE_TTL_SECONDS: i64 = 10 * 60;
 
 pub const IMPLEMENTED_MODES: [CleanupMode; 3] = [
     CleanupMode::Gone,
     CleanupMode::Unpushed,
     CleanupMode::Closed,
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanIntent {
+    Preview,
+    Clean,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScanOptions<'a> {
+    pub modes: &'a [CleanupMode],
+    pub remote: &'a str,
+    pub intent: ScanIntent,
+}
+
+impl<'a> ScanOptions<'a> {
+    pub fn preview(modes: &'a [CleanupMode], remote: &'a str) -> Self {
+        Self {
+            modes,
+            remote,
+            intent: ScanIntent::Preview,
+        }
+    }
+
+    pub fn clean(modes: &'a [CleanupMode], remote: &'a str) -> Self {
+        Self {
+            modes,
+            remote,
+            intent: ScanIntent::Clean,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScanOutcome {
+    pub groups: Vec<CleanupGroup>,
+    pub notes: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CleanupMode {
@@ -423,6 +462,12 @@ struct ClosedModeData {
     pull_requests: HashMap<String, PullRequestRecord>,
 }
 
+#[derive(Debug, Clone)]
+struct ClosedModeResolution {
+    data: Option<ClosedModeData>,
+    note: Option<String>,
+}
+
 const GH_HEAD_SEARCH_CHUNK_SIZE: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,7 +514,7 @@ pub fn scan_selected_modes(
     modes: &[CleanupMode],
     remote: &str,
 ) -> Result<Vec<CleanupGroup>> {
-    scan_selected_modes_with_progress(repo, modes, remote, |_, _| {})
+    Ok(scan_with_options(repo, ScanOptions::preview(modes, remote), |_, _| {})?.groups)
 }
 
 pub fn scan_selected_modes_with_progress<F>(
@@ -478,6 +523,24 @@ pub fn scan_selected_modes_with_progress<F>(
     remote: &str,
     mut progress: F,
 ) -> Result<Vec<CleanupGroup>>
+where
+    F: FnMut(ScanProgress, Option<&str>),
+{
+    Ok(scan_with_options(
+        repo,
+        ScanOptions::preview(modes, remote),
+        |stage, detail| {
+            progress(stage, detail);
+        },
+    )?
+    .groups)
+}
+
+pub fn scan_with_options<F>(
+    repo: &Path,
+    options: ScanOptions<'_>,
+    mut progress: F,
+) -> Result<ScanOutcome>
 where
     F: FnMut(ScanProgress, Option<&str>),
 {
@@ -491,44 +554,57 @@ where
     progress(ScanProgress::ReadingWorktrees, None);
     let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
 
-    if modes.contains(&CleanupMode::Closed) {
-        progress(ScanProgress::SyncingRemoteRefs, Some(remote));
-        fetch_prune_remote(repo, remote)?;
+    if options.intent == ScanIntent::Clean && options.modes.contains(&CleanupMode::Closed) {
+        progress(ScanProgress::SyncingRemoteRefs, Some(options.remote));
+        fetch_prune_remote(repo, options.remote)?;
     }
 
     progress(ScanProgress::LoadingLocalBranches, None);
     let mut all_branches =
         load_branch_inventory(repo, current_branch.as_deref(), None, &worktree_branches)?;
 
-    let closed_candidate_heads = closed_candidate_heads(&all_branches, remote);
+    let closed_candidate_heads = closed_candidate_heads(&all_branches, options.remote);
 
-    let closed_mode_data = if modes.contains(&CleanupMode::Closed) {
-        let closed_mode_data =
-            load_closed_mode_data(repo, remote, &closed_candidate_heads, &mut progress)?;
-        apply_default_branch_protection(&mut all_branches, &closed_mode_data.default_branch);
-        Some(closed_mode_data)
+    let closed_resolution = if options.modes.contains(&CleanupMode::Closed) {
+        let resolution = resolve_closed_mode_data(
+            repo,
+            options.remote,
+            &closed_candidate_heads,
+            options.intent,
+            &mut progress,
+        )?;
+        if let Some(closed_mode_data) = &resolution.data {
+            apply_default_branch_protection(&mut all_branches, &closed_mode_data.default_branch);
+        }
+        Some(resolution)
     } else {
         None
     };
 
     let mut groups = Vec::new();
-    for mode in modes.iter().copied() {
+    for mode in options.modes.iter().copied() {
         match mode {
-            CleanupMode::Closed => groups.extend(
-                build_closed_groups(
-                    &all_branches,
-                    closed_mode_data
-                        .as_ref()
-                        .expect("closed mode data loaded when mode selected"),
-                    remote,
-                    &mut progress,
-                )
-                .into_iter()
-                .map(|mut group| {
-                    group.branches = apply_keep_labels(group.mode, group.branches, &keep_store);
-                    group
-                }),
-            ),
+            CleanupMode::Closed => {
+                if let Some(closed_mode_data) = closed_resolution
+                    .as_ref()
+                    .and_then(|resolution| resolution.data.as_ref())
+                {
+                    groups.extend(
+                        build_closed_groups(
+                            &all_branches,
+                            closed_mode_data,
+                            options.remote,
+                            &mut progress,
+                        )
+                        .into_iter()
+                        .map(|mut group| {
+                            group.branches =
+                                apply_keep_labels(group.mode, group.branches, &keep_store);
+                            group
+                        }),
+                    );
+                }
+            }
             _ => {
                 let branches = all_branches
                     .iter()
@@ -543,7 +619,12 @@ where
         }
     }
 
-    Ok(groups)
+    let notes = closed_resolution
+        .and_then(|resolution| resolution.note)
+        .into_iter()
+        .collect();
+
+    Ok(ScanOutcome { groups, notes })
 }
 
 pub fn delete_branches(
@@ -778,7 +859,117 @@ fn first_regular_from(branches: &[Branch], start: usize) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-fn load_closed_mode_data<F>(
+fn resolve_closed_mode_data<F>(
+    repo: &Path,
+    remote: &str,
+    candidate_heads: &[String],
+    intent: ScanIntent,
+    progress: &mut F,
+) -> Result<ClosedModeResolution>
+where
+    F: FnMut(ScanProgress, Option<&str>),
+{
+    match intent {
+        ScanIntent::Clean => {
+            let closed_mode_data =
+                refresh_closed_mode_data(repo, remote, candidate_heads, progress)?;
+            persist_closed_mode_cache(repo, remote, &closed_mode_data)?;
+            Ok(ClosedModeResolution {
+                data: Some(closed_mode_data),
+                note: None,
+            })
+        }
+        ScanIntent::Preview => {
+            if let Some(closed_mode_data) = load_fresh_closed_mode_cache(repo, remote)? {
+                return Ok(ClosedModeResolution {
+                    data: Some(closed_mode_data),
+                    note: None,
+                });
+            }
+
+            match refresh_closed_mode_data(repo, remote, candidate_heads, progress) {
+                Ok(closed_mode_data) => {
+                    persist_closed_mode_cache(repo, remote, &closed_mode_data)?;
+                    Ok(ClosedModeResolution {
+                        data: Some(closed_mode_data),
+                        note: None,
+                    })
+                }
+                Err(error) => Ok(ClosedModeResolution {
+                    data: None,
+                    note: Some(format!("closed metadata unavailable: {error:#}")),
+                }),
+            }
+        }
+    }
+}
+
+fn load_fresh_closed_mode_cache(repo: &Path, remote: &str) -> Result<Option<ClosedModeData>> {
+    let remote_url = remote_url(repo, remote)?;
+    let cache = PrCache::load(repo)?;
+    let Some(entry) = cache.remote_entry(remote, &remote_url) else {
+        return Ok(None);
+    };
+
+    if !pr_cache_is_fresh(entry.refreshed_at) {
+        return Ok(None);
+    }
+
+    Ok(Some(closed_mode_data_from_cache(entry)))
+}
+
+fn persist_closed_mode_cache(repo: &Path, remote: &str, data: &ClosedModeData) -> Result<()> {
+    let remote_url = remote_url(repo, remote)?;
+    let mut cache = match PrCache::load(repo) {
+        Ok(cache) => cache,
+        Err(_) => PrCache::new(repo)?,
+    };
+    let entry = PrCacheRemoteEntry {
+        remote_url,
+        refreshed_at: current_unix_timestamp(),
+        default_branch: data.default_branch.clone(),
+        pull_requests_by_head: data
+            .pull_requests
+            .iter()
+            .map(|(head_ref_name, record)| {
+                (
+                    head_ref_name.clone(),
+                    CachedPullRequestRecord {
+                        state: record.state.clone(),
+                        url: record.url.clone(),
+                    },
+                )
+            })
+            .collect(),
+    };
+    cache.replace_remote(remote, entry)
+}
+
+fn closed_mode_data_from_cache(entry: &PrCacheRemoteEntry) -> ClosedModeData {
+    ClosedModeData {
+        default_branch: entry.default_branch.clone(),
+        pull_requests: entry
+            .pull_requests_by_head
+            .iter()
+            .map(|(head_ref_name, record)| {
+                (
+                    head_ref_name.clone(),
+                    PullRequestRecord {
+                        state: record.state.clone(),
+                        head_ref_name: head_ref_name.clone(),
+                        url: record.url.clone(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn pr_cache_is_fresh(refreshed_at: i64) -> bool {
+    current_unix_timestamp().saturating_sub(refreshed_at) <= PR_CACHE_TTL_SECONDS
+}
+
+fn refresh_closed_mode_data<F>(
     repo: &Path,
     remote: &str,
     candidate_heads: &[String],
@@ -985,12 +1176,7 @@ fn ensure_work_tree(repo: &Path) -> Result<()> {
 }
 
 fn format_relative_age(committed_at: i64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_secs() as i64;
-
-    format_age_from_seconds(now.saturating_sub(committed_at).max(0) as u64)
+    format_age_from_seconds(current_unix_timestamp().saturating_sub(committed_at).max(0) as u64)
 }
 
 fn format_age_from_seconds(seconds: u64) -> String {
@@ -1025,6 +1211,13 @@ fn unit_label(value: u64, unit: &str) -> String {
     } else {
         format!("{value} {unit}s ago")
     }
+}
+
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_secs() as i64
 }
 
 fn current_branch(repo: &Path) -> Result<Option<String>> {
@@ -1070,6 +1263,10 @@ fn other_worktree_branches(repo: &Path, current_branch: Option<&str>) -> Result<
 }
 
 fn ensure_remote_exists(repo: &Path, remote: &str) -> Result<()> {
+    remote_url(repo, remote).map(|_| ())
+}
+
+fn remote_url(repo: &Path, remote: &str) -> Result<String> {
     let output = Command::new("git")
         .args(["remote", "get-url", remote])
         .current_dir(repo)
@@ -1077,7 +1274,9 @@ fn ensure_remote_exists(repo: &Path, remote: &str) -> Result<()> {
         .context("failed to inspect git remotes")?;
 
     if output.status.success() {
-        return Ok(());
+        return String::from_utf8(output.stdout)
+            .context("git remote get-url returned non-utf8 output")
+            .map(|url| url.trim().to_string());
     }
 
     bail!("remote `{remote}` does not exist")

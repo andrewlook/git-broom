@@ -142,7 +142,7 @@ fn dry_run_groups_closed_mode_by_reason() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["closed", "--dry-run"])
+        .args(["--groups", "closed", "--dry-run"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
@@ -169,6 +169,169 @@ fn dry_run_groups_closed_mode_by_reason() {
 }
 
 #[test]
+fn default_command_prints_grouped_preview_without_prompting_for_cleanup() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/local-only");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .current_dir(repo.local_path())
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("[unpushed: no upstream tracking branch is configured]"));
+    assert!(stdout.contains("feature/local-only"));
+    assert!(!stdout.contains("Proceed? [y/N]"));
+}
+
+#[test]
+fn closed_preview_writes_pr_cache_and_reuses_it_without_hitting_gh() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+
+    let fake_gh_dir = repo.install_fake_gh(
+        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"}]"#,
+    );
+
+    let first = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&fake_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(first.status.success());
+    assert!(repo.pr_cache_path().exists());
+    let first_stdout = String::from_utf8(first.stdout).expect("utf8 stdout");
+    assert!(first_stdout.contains("https://example.test/pr/1"));
+
+    let failing_gh_dir = repo.install_failing_gh();
+    let second = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&failing_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        second.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let second_stdout = String::from_utf8(second.stdout).expect("utf8 stdout");
+    assert!(second_stdout.contains("https://example.test/pr/1"));
+    assert!(!second_stdout.contains("closed metadata unavailable"));
+}
+
+#[test]
+fn stale_closed_preview_cache_is_not_trusted() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+
+    let fake_gh_dir = repo.install_fake_gh(
+        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"}]"#,
+    );
+
+    let first = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&fake_gh_dir))
+        .output()
+        .expect("git-broom runs");
+    assert!(first.status.success());
+
+    let cache_path = repo.pr_cache_path();
+    let mut cache_json = serde_json::from_str::<serde_json::Value>(
+        &fs::read_to_string(&cache_path).expect("cache written"),
+    )
+    .expect("cache json parses");
+    cache_json["entries_by_remote"]["origin"]["refreshed_at"] = serde_json::Value::from(0);
+    fs::write(
+        &cache_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&cache_json).expect("cache json serialized")
+        ),
+    )
+    .expect("stale cache written");
+
+    let failing_gh_dir = repo.install_failing_gh();
+    let second = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&failing_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        second.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let second_stdout = String::from_utf8(second.stdout).expect("utf8 stdout");
+    assert!(second_stdout.contains("Note: closed metadata unavailable"));
+    assert!(!second_stdout.contains("https://example.test/pr/1"));
+}
+
+#[test]
+fn preview_degrades_gracefully_when_closed_metadata_is_unavailable() {
+    let repo = TestRepo::new();
+    repo.create_gone_branch("feature/gone");
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+
+    let failing_gh_dir = repo.install_failing_gh();
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "gone,closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&failing_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("[gone: upstream branch no longer exists]"));
+    assert!(stdout.contains("feature/gone"));
+    assert!(stdout.contains("Note: closed metadata unavailable"));
+    assert!(!stdout.contains("[closed:"));
+}
+
+#[test]
+fn clean_closed_aborts_before_review_when_github_refresh_fails() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+
+    let failing_gh_dir = repo.install_failing_gh();
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["clean", "--groups", "closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&failing_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(!output.status.success(), "clean should fail closed");
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("Error:"));
+    assert!(!stderr.contains("Proceed? [y/N]"));
+}
+
+#[test]
 fn closed_mode_excludes_open_prs_found_via_head_search() {
     let repo = TestRepo::new();
     repo.create_remote_tracked_branch("feature/open", "origin");
@@ -180,7 +343,7 @@ fn closed_mode_excludes_open_prs_found_via_head_search() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["closed", "--dry-run"])
+        .args(["--groups", "closed", "--dry-run"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
@@ -211,7 +374,7 @@ fn closed_mode_excludes_merged_branches_whose_remote_is_already_gone() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["closed", "--dry-run"])
+        .args(["--groups", "closed", "--dry-run"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
@@ -398,6 +561,14 @@ impl TestRepo {
         .join("git-broom/keep-labels.json")
     }
 
+    fn pr_cache_path(&self) -> PathBuf {
+        PathBuf::from(
+            self.git_local_stdout(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+                .trim(),
+        )
+        .join("git-broom/pr-cache.json")
+    }
+
     fn install_fake_gh(&self, pr_list_json: &str) -> PathBuf {
         let bin_dir = self.temp_path("fake-bin");
         fs::create_dir_all(&bin_dir).expect("fake bin dir created");
@@ -472,6 +643,23 @@ printf 'unexpected gh invocation: %s\n' "$*" >&2
 exit 1
 "#
         );
+        fs::write(&script_path, script).expect("fake gh written");
+        let output = Command::new("chmod")
+            .args(["+x", script_path.to_str().expect("utf8 path")])
+            .output()
+            .expect("chmod runs");
+        assert!(output.status.success(), "chmod failed");
+        bin_dir
+    }
+
+    fn install_failing_gh(&self) -> PathBuf {
+        let bin_dir = self.temp_path("fake-bin-failing-gh");
+        fs::create_dir_all(&bin_dir).expect("fake bin dir created");
+        let script_path = bin_dir.join("gh");
+        let script = r#"#!/bin/sh
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#;
         fs::write(&script_path, script).expect("fake gh written");
         let output = Command::new("chmod")
             .args(["+x", script_path.to_str().expect("utf8 path")])

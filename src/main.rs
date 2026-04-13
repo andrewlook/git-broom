@@ -15,8 +15,8 @@ use crossterm::terminal::{
     enable_raw_mode, size,
 };
 use git_broom::app::{
-    App, Branch, CleanupGroup, CleanupMode, IMPLEMENTED_MODES, ScanProgress, delete_branch,
-    scan_selected_modes, scan_selected_modes_with_progress,
+    App, Branch, CleanupGroup, CleanupMode, IMPLEMENTED_MODES, ScanOptions, ScanOutcome,
+    ScanProgress, delete_branch, scan_with_options,
 };
 use git_broom::keep_store::KeepStore;
 use ratatui::Terminal;
@@ -32,62 +32,82 @@ fn main() {
 fn run() -> Result<()> {
     let cli = parse_cli(env::args().skip(1))?;
     let repo = env::current_dir()?;
-    let groups = if cli.modes.contains(&CleanupMode::Closed) {
-        let mut status = ScanStatusLine::new();
-        let groups =
-            scan_selected_modes_with_progress(&repo, &cli.modes, &cli.remote, |stage, detail| {
-                status.update(stage, detail);
-            })?;
-        status.finish();
-        groups
-    } else {
-        scan_selected_modes(&repo, &cli.modes, &cli.remote)?
+    let outcome = match cli.intent {
+        CliIntent::Preview => scan_with_options(
+            &repo,
+            ScanOptions::preview(&cli.modes, &cli.remote),
+            |_, _| {},
+        )?,
+        CliIntent::Clean if cli.modes.contains(&CleanupMode::Closed) => {
+            let mut status = ScanStatusLine::new();
+            let outcome = scan_with_options(
+                &repo,
+                ScanOptions::clean(&cli.modes, &cli.remote),
+                |stage, detail| {
+                    status.update(stage, detail);
+                },
+            )?;
+            status.finish();
+            outcome
+        }
+        CliIntent::Clean => scan_with_options(
+            &repo,
+            ScanOptions::clean(&cli.modes, &cli.remote),
+            |_, _| {},
+        )?,
     };
 
-    match cli.output {
-        OutputMode::Interactive => run_interactive(&repo, &cli.remote, groups),
-        OutputMode::Batch => run_batch(&groups),
-        OutputMode::DryRun => run_dry_run(&groups),
+    match cli.intent {
+        CliIntent::Preview => run_preview(&outcome),
+        CliIntent::Clean => run_interactive(&repo, &cli.remote, outcome.groups),
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputMode {
-    Interactive,
-    Batch,
-    DryRun,
+enum CliIntent {
+    Preview,
+    Clean,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliOptions {
     modes: Vec<CleanupMode>,
-    output: OutputMode,
+    intent: CliIntent,
     remote: String,
 }
 
 fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
     let mut modes = Vec::new();
-    let mut output = OutputMode::Interactive;
     let mut remote = String::from("origin");
     let mut args = args.peekable();
+    let intent = if matches!(args.peek().map(String::as_str), Some("clean")) {
+        args.next();
+        CliIntent::Clean
+    } else {
+        CliIntent::Preview
+    };
+    let mut saw_preview_alias = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--batch" => {
-                if output == OutputMode::DryRun {
-                    bail!("--batch and --dry-run cannot be used together");
-                }
-                output = OutputMode::Batch;
-            }
-            "--dry-run" => {
-                if output == OutputMode::Batch {
-                    bail!("--batch and --dry-run cannot be used together");
-                }
-                output = OutputMode::DryRun;
-            }
+            "--batch" | "--dry-run" => saw_preview_alias = true,
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
+            }
+            "-g" | "--groups" => {
+                let Some(value) = args.next() else {
+                    bail!(
+                        "{} requires a comma-separated value\n\n{}",
+                        arg,
+                        usage_text()
+                    );
+                };
+                for mode in parse_groups_value(&value)? {
+                    if !modes.contains(&mode) {
+                        modes.push(mode);
+                    }
+                }
             }
             "--remote" => {
                 let Some(value) = args.next() else {
@@ -96,13 +116,10 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
                 remote = value;
             }
             value => {
-                let Some(mode) = CleanupMode::from_arg(value) else {
-                    bail!("unknown cleanup mode `{value}`\n\n{}", usage_text());
-                };
-
-                if !modes.contains(&mode) {
-                    modes.push(mode);
-                }
+                bail!(
+                    "unknown argument `{value}`. Use -g/--groups to choose cleanup groups.\n\n{}",
+                    usage_text()
+                );
             }
         }
     }
@@ -111,16 +128,48 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
         modes = IMPLEMENTED_MODES.to_vec();
     }
 
+    if intent == CliIntent::Clean && saw_preview_alias {
+        bail!(
+            "`git-broom clean` is destructive. Remove `--dry-run` / `--batch`, or run `git-broom` without `clean` to preview groups.\n\n{}",
+            usage_text()
+        );
+    }
+
     Ok(CliOptions {
         modes,
-        output,
+        intent,
         remote,
     })
 }
 
+fn parse_groups_value(value: &str) -> Result<Vec<CleanupMode>> {
+    let mut modes = Vec::new();
+
+    for raw in value.split(',') {
+        let group = raw.trim();
+        if group.is_empty() {
+            bail!("--groups cannot contain empty group names");
+        }
+
+        let Some(mode) = CleanupMode::from_arg(group) else {
+            bail!("unknown cleanup group `{group}`");
+        };
+
+        if !modes.contains(&mode) {
+            modes.push(mode);
+        }
+    }
+
+    if modes.is_empty() {
+        bail!("--groups requires at least one cleanup group");
+    }
+
+    Ok(modes)
+}
+
 fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Result<()> {
     if groups.iter().all(|group| group.branches.is_empty()) {
-        println!("No branches found for selected cleanup modes.");
+        println!("No branches found for selected cleanup groups.");
         return Ok(());
     }
 
@@ -187,17 +236,23 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
     Ok(())
 }
 
-fn run_batch(groups: &[CleanupGroup]) -> Result<()> {
-    for line in format_preview_lines(groups, preview_width()) {
-        println!("{line}");
+fn run_preview(outcome: &ScanOutcome) -> Result<()> {
+    if !outcome.groups.is_empty() {
+        for line in format_preview_lines(&outcome.groups, preview_width()) {
+            println!("{line}");
+        }
+    } else if outcome.notes.is_empty() {
+        println!("No branches found for selected cleanup groups.");
     }
 
-    Ok(())
-}
+    if !outcome.notes.is_empty() {
+        if !outcome.groups.is_empty() {
+            println!();
+        }
 
-fn run_dry_run(groups: &[CleanupGroup]) -> Result<()> {
-    for line in format_preview_lines(groups, preview_width()) {
-        println!("{line}");
+        for note in &outcome.notes {
+            println!("Note: {note}");
+        }
     }
 
     Ok(())
@@ -398,7 +453,7 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
 
     if lines.is_empty() {
         return vec![String::from(
-            "No branches found for selected cleanup modes.",
+            "No branches found for selected cleanup groups.",
         )];
     }
 
@@ -747,47 +802,53 @@ fn column_widths(mode: CleanupMode, width: usize) -> (usize, usize, usize) {
 }
 
 fn usage_text() -> &'static str {
-    r#"git-broom cleans up stale local branches in step-by-step review groups.
+    r#"git-broom shows grouped local-branch inventory by default, then cleans branches only when you ask it to.
 
 Usage:
-  git-broom [gone] [unpushed] [closed] [--remote <name>] [--batch | --dry-run]
+  git-broom [-g <gone,unpushed,closed>] [--remote <name>] [--batch | --dry-run]
+  git-broom clean [-g <gone,unpushed,closed>] [--remote <name>]
 
-Cleanup modes:
+Cleanup groups:
   gone       Upstream branch no longer exists on the remote.
   unpushed   Local branch has no upstream tracking branch configured.
   closed     Remote-tracked branch has a closed or missing GitHub PR.
-             This can expand into multiple review groups, such as:
+             This can expand into two review groups:
              - closed: closed PR or no PR
              - merged: PR merged but remote branch still exists
 
 How it works:
-  - With no modes, git-broom reviews all implemented cleanup modes in order.
-  - Interactive mode walks one group at a time and asks for confirmation
-    before deleting that group's selected branches.
-  - --dry-run and --batch print a readable preview of the same grouped flow
-    without deleting anything.
+  - `git-broom` previews all selected groups without deleting anything.
+  - `git-broom clean` enters the step-by-step destructive review flow.
+  - Closed-mode preview reuses cached GitHub PR metadata when it is fresh.
+    `git-broom clean` refreshes GitHub data before any destructive review.
+  - `--dry-run` and `--batch` are compatibility aliases for the same default
+    grouped preview output.
   - Protected branches stay visible for context but cannot be deleted.
   - Press s in the TUI to save or unsave a branch for this repo and mode.
     Saved branches stay visible but are excluded from delete-all until unsaved.
 
 Options:
-  --dry-run        Show the grouped preview without deleting anything.
-  --batch          Print the same readable grouped preview without entering the TUI.
+  -g, --groups    Comma-separated groups to show or clean. Default: all.
+  --dry-run        Compatibility alias for the default grouped preview.
+  --batch          Compatibility alias for the default grouped preview.
   --remote <name>  Remote to use for closed mode. Default: origin.
   -h, --help       Show this help text.
 
 Examples:
   git-broom
-      Review all cleanup modes in order.
+      Preview all implemented cleanup groups.
 
-  git-broom gone unpushed
-      Only review gone and unpushed branches.
+  git-broom --groups gone,unpushed
+      Preview only gone and unpushed groups.
 
-  git-broom closed --dry-run
-      Preview closed/merged GitHub-backed cleanup groups.
+  git-broom clean
+      Review all groups interactively and confirm deletions per group.
 
-  git-broom closed --remote upstream
-      Use the upstream remote instead of origin for closed mode.
+  git-broom clean --groups gone,unpushed
+      Only clean gone and unpushed branches.
+
+  git-broom --groups closed --remote upstream
+      Preview closed/merged groups using the upstream remote.
 "#
 }
 
@@ -900,8 +961,8 @@ mod tests {
     use git_broom::app::{Branch, CleanupGroup, CleanupMode, Decision};
 
     use super::{
-        CommandLineState, OutputMode, fit_for_column, format_delete_command, format_preview_lines,
-        is_immediate_exit, parse_cli, shell_quote,
+        CliIntent, CommandLineState, fit_for_column, format_delete_command, format_preview_lines,
+        is_immediate_exit, parse_cli, parse_groups_value, shell_quote,
     };
 
     fn sample_branch(name: &str) -> Branch {
@@ -921,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_defaults_to_all_modes() {
+    fn parse_cli_defaults_to_preview_all_modes() {
         let cli = parse_cli(std::iter::empty()).expect("cli parses");
 
         assert_eq!(
@@ -932,36 +993,74 @@ mod tests {
                 CleanupMode::Closed
             ]
         );
-        assert_eq!(cli.output, OutputMode::Interactive);
+        assert_eq!(cli.intent, CliIntent::Preview);
         assert_eq!(cli.remote, "origin");
     }
 
     #[test]
-    fn parse_cli_accepts_multiple_modes_with_dry_run() {
+    fn parse_cli_accepts_multiple_modes_for_preview_alias() {
         let cli = parse_cli(
-            ["gone", "unpushed", "--dry-run"]
+            ["--groups", "gone,unpushed", "--dry-run"]
                 .into_iter()
                 .map(str::to_string),
         )
         .expect("cli parses");
 
         assert_eq!(cli.modes, vec![CleanupMode::Gone, CleanupMode::Unpushed]);
-        assert_eq!(cli.output, OutputMode::DryRun);
+        assert_eq!(cli.intent, CliIntent::Preview);
         assert_eq!(cli.remote, "origin");
     }
 
     #[test]
-    fn parse_cli_accepts_remote_for_closed_mode() {
+    fn parse_cli_accepts_remote_for_clean_closed_mode() {
         let cli = parse_cli(
-            ["closed", "--remote", "upstream"]
+            ["clean", "--groups", "closed", "--remote", "upstream"]
                 .into_iter()
                 .map(str::to_string),
         )
         .expect("cli parses");
 
         assert_eq!(cli.modes, vec![CleanupMode::Closed]);
-        assert_eq!(cli.output, OutputMode::Interactive);
+        assert_eq!(cli.intent, CliIntent::Clean);
         assert_eq!(cli.remote, "upstream");
+    }
+
+    #[test]
+    fn parse_cli_rejects_clean_with_preview_alias() {
+        let error = parse_cli(["clean", "--dry-run"].into_iter().map(str::to_string))
+            .expect_err("clean preview alias rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("`git-broom clean` is destructive")
+        );
+    }
+
+    #[test]
+    fn parse_groups_value_accepts_comma_separated_groups() {
+        let groups = parse_groups_value("gone, closed,unpushed").expect("groups parse");
+
+        assert_eq!(
+            groups,
+            vec![
+                CleanupMode::Gone,
+                CleanupMode::Closed,
+                CleanupMode::Unpushed
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_cli_rejects_positional_group_arguments() {
+        let error =
+            parse_cli(["gone"].into_iter().map(str::to_string)).expect_err("positional rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Use -g/--groups to choose cleanup groups")
+        );
     }
 
     #[test]
