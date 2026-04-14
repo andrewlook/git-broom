@@ -4,6 +4,7 @@ use std::panic;
 use std::path::Path;
 use std::process;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -366,22 +367,14 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
             continue;
         }
 
-        if !lines.is_empty() {
+        if lines.is_empty() {
             lines.push(String::new());
         }
 
         step_index += 1;
-        let (branch_width, secondary_width, age_width) =
-            preview_column_widths(group.mode, available_width);
-        lines.push(format_preview_header(
-            group,
-            group.mode,
-            step_index,
-            step_count,
-            branch_width,
-            secondary_width,
-            age_width,
-        ));
+        let (branch_width, secondary_width) =
+            preview_column_widths(group.mode, available_width, &group.branches);
+        lines.push(format_preview_header(group, step_index, step_count));
         let mut previous_section = None;
         for branch in &group.branches {
             if previous_section.is_some() && previous_section != Some(branch.section()) {
@@ -392,7 +385,6 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
                 branch,
                 branch_width,
                 secondary_width,
-                age_width,
             ));
             previous_section = Some(branch.section());
         }
@@ -407,27 +399,8 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
     lines
 }
 
-fn format_preview_header(
-    group: &CleanupGroup,
-    mode: CleanupMode,
-    step_index: usize,
-    step_count: usize,
-    branch_width: usize,
-    secondary_width: usize,
-    age_width: usize,
-) -> String {
-    let secondary_label = secondary_column_label(mode);
-    let group_header = format_group_header(
-        &group.name,
-        &group.description,
-        step_index,
-        step_count,
-        branch_width,
-    );
-    let secondary_header = format_preview_column_header(secondary_label, secondary_width);
-    let age_header = format_preview_column_header("age", age_width);
-
-    format!("  {group_header}  {secondary_header}  {age_header}")
+fn format_preview_header(group: &CleanupGroup, step_index: usize, step_count: usize) -> String {
+    format_group_header(&group.name, &group.description, step_index, step_count)
 }
 
 fn format_preview_branch(
@@ -435,20 +408,20 @@ fn format_preview_branch(
     branch: &Branch,
     branch_width: usize,
     secondary_width: usize,
-    age_width: usize,
 ) -> Vec<String> {
     let secondary_value = secondary_column_value(branch, mode);
-    let branch_value = pad(&branch.display_name(), branch_width);
+    let compact_age = compact_age_display(branch.committed_at);
+    let branch_name_width = branch_width.saturating_sub(compact_age.chars().count() + 1);
+    let branch_value = pad(&branch.display_name(), branch_name_width);
     let secondary_padded = left_pad(
         &truncate(&secondary_value, secondary_width),
         secondary_width,
     );
-    let age_padded = left_pad(&branch.relative_date, age_width);
     let mut lines = vec![format!(
-        "  {}  {}  {}",
+        "  {} {}  {}",
         style_branch_preview(branch, &branch_value),
+        style_age_preview(&compact_age),
         style_secondary_preview(branch, mode, &secondary_padded),
-        style_age_preview(branch, &age_padded),
     )];
 
     if let Some(detail) = &branch.detail {
@@ -456,7 +429,7 @@ fn format_preview_branch(
             "     {}",
             truncate(
                 detail,
-                preview_total_width(branch_width, secondary_width, age_width) - 5
+                preview_total_width(branch_width, secondary_width) - 5
             )
         ));
     }
@@ -464,13 +437,17 @@ fn format_preview_branch(
     lines
 }
 
-fn preview_column_widths(mode: CleanupMode, available_width: usize) -> (usize, usize, usize) {
+fn preview_column_widths(
+    mode: CleanupMode,
+    available_width: usize,
+    branches: &[Branch],
+) -> (usize, usize) {
     let content_width = available_width.saturating_sub(2).max(40);
-    column_widths(mode, content_width.saturating_sub(2))
+    column_widths(mode, content_width.saturating_sub(2), branches)
 }
 
-fn preview_total_width(branch_width: usize, commit_width: usize, age_width: usize) -> usize {
-    2 + branch_width + 2 + commit_width + 2 + age_width
+fn preview_total_width(branch_width: usize, commit_width: usize) -> usize {
+    2 + branch_width + 2 + commit_width
 }
 
 fn preview_width() -> usize {
@@ -484,54 +461,26 @@ fn preview_width() -> usize {
 fn format_group_header(
     group_name: &str,
     group_description: &str,
-    step_index: usize,
-    step_count: usize,
-    width: usize,
+    _step_index: usize,
+    _step_count: usize,
 ) -> String {
-    let plain = format!("{group_name} ({group_description}) [{step_index}/{step_count}]");
+    let plain = format!("{group_name} ({group_description})");
     if !io::stdout().is_terminal() {
-        return pad(&plain, width);
+        return plain;
     }
 
-    let visible_width = plain.chars().count();
-    if visible_width > width {
-        return format!(
-            "{}",
-            pad(&plain, width)
-                .as_str()
-                .bold()
-                .with(group_header_color(group_name))
-        );
-    }
-
-    let padding = " ".repeat(width.saturating_sub(visible_width));
+    let explanation_color = group_header_color(group_name);
     format!(
-        "{} {} {}{}",
+        "{} {}",
         group_name
             .to_ascii_uppercase()
             .as_str()
             .bold()
             .with(group_header_color(group_name)),
-        format!("({group_description})").dark_grey(),
-        format!("[{step_index}/{step_count}]").dark_grey(),
-        padding
+        format!("({group_description})")
+            .with(explanation_color)
+            .dim(),
     )
-}
-
-fn format_preview_column_header(label: &str, width: usize) -> String {
-    let padded = left_pad(label, width);
-    if io::stdout().is_terminal() {
-        let trimmed = padded.trim_start();
-        let padding = " ".repeat(
-            padded
-                .chars()
-                .count()
-                .saturating_sub(trimmed.chars().count()),
-        );
-        format!("{padding}{}", trimmed.bold().underlined())
-    } else {
-        padded
-    }
 }
 
 fn style_branch_preview(branch: &Branch, value: &str) -> String {
@@ -540,7 +489,7 @@ fn style_branch_preview(branch: &Branch, value: &str) -> String {
     }
 
     match branch.section() {
-        git_broom::app::BranchSection::Protected => format!("{}", value.dark_grey()),
+        git_broom::app::BranchSection::Protected => value.to_string(),
         git_broom::app::BranchSection::Saved => format!("{}", value.green()),
         git_broom::app::BranchSection::Regular => value.to_string(),
     }
@@ -571,16 +520,12 @@ fn style_secondary_preview(branch: &Branch, mode: CleanupMode, value: &str) -> S
     }
 }
 
-fn style_age_preview(branch: &Branch, value: &str) -> String {
+fn style_age_preview(value: &str) -> String {
     if !io::stdout().is_terminal() {
         return value.to_string();
     }
 
-    match branch.section() {
-        git_broom::app::BranchSection::Protected => format!("{}", value.dark_grey()),
-        git_broom::app::BranchSection::Saved => format!("{}", value.green()),
-        git_broom::app::BranchSection::Regular => value.to_string(),
-    }
+    format!("{}", value.dark_grey())
 }
 
 fn group_header_color(group_name: &str) -> crossterm::style::Color {
@@ -634,14 +579,6 @@ fn left_pad(value: &str, width: usize) -> String {
     format!("{}{}", " ".repeat(width - visible), truncated)
 }
 
-fn secondary_column_label(mode: CleanupMode) -> &'static str {
-    if mode.uses_pr_metadata() {
-        "pull request"
-    } else {
-        "last commit"
-    }
-}
-
 fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
     if mode.uses_pr_metadata() {
         branch
@@ -653,25 +590,72 @@ fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
     }
 }
 
-fn column_widths(mode: CleanupMode, width: usize) -> (usize, usize, usize) {
+fn column_widths(mode: CleanupMode, width: usize, branches: &[Branch]) -> (usize, usize) {
     let min_branch = 12;
     let min_secondary = 12;
-    let max_age = 14;
-    let age_width = width
-        .saturating_sub(min_branch + min_secondary + 4)
-        .min(max_age);
-    let remaining = width.saturating_sub(age_width + 4);
-    let preferred_branch = if mode.uses_pr_metadata() {
-        remaining / 3
-    } else {
-        remaining * 2 / 5
-    };
-    let branch_width = preferred_branch
-        .max(min_branch)
-        .min(remaining.saturating_sub(min_secondary));
-    let secondary_width = remaining.saturating_sub(branch_width).max(min_secondary);
+    let remaining = width.saturating_sub(2);
+    let max_branch = branches
+        .iter()
+        .map(|branch| {
+            branch.display_name().chars().count()
+                + 1
+                + compact_age_display(branch.committed_at).chars().count()
+        })
+        .max()
+        .unwrap_or(min_branch);
+    let max_secondary = branches
+        .iter()
+        .map(|branch| secondary_column_value(branch, mode).chars().count())
+        .max()
+        .unwrap_or(min_secondary);
 
-    (branch_width, secondary_width, age_width)
+    let mut branch_width = max_branch.max(min_branch);
+    let mut secondary_width = max_secondary.max(min_secondary);
+    let total = branch_width + 2 + secondary_width;
+    if total > width {
+        let overflow = total - width;
+        let branch_reduction = overflow.min(branch_width.saturating_sub(min_branch));
+        branch_width -= branch_reduction;
+    }
+
+    branch_width = branch_width.min(remaining.saturating_sub(min_secondary));
+    secondary_width = remaining.saturating_sub(branch_width).max(min_secondary);
+
+    (branch_width, secondary_width)
+}
+
+fn compact_age_display(committed_at: i64) -> String {
+    let age_seconds = current_unix_timestamp().saturating_sub(committed_at).max(0) as u64;
+    if age_seconds < 60 {
+        return String::from("now");
+    }
+
+    let minute = 60;
+    let hour = 60 * minute;
+    let day = 24 * hour;
+    let week = 7 * day;
+    let month = 30 * day;
+
+    if age_seconds < hour {
+        return format!("{}m", age_seconds / minute);
+    }
+    if age_seconds < day {
+        return format!("{}h", age_seconds / hour);
+    }
+    if age_seconds < week {
+        return format!("{}d", age_seconds / day);
+    }
+    if age_seconds < month {
+        return format!("{}w", age_seconds / week);
+    }
+    format!("{}mo", age_seconds / month)
+}
+
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn usage_text() -> &'static str {
@@ -977,16 +961,13 @@ mod tests {
             200,
         );
 
-        let first_header = lines[0].to_lowercase();
+        let first_header = lines[1].to_lowercase();
         let second_header = lines[3].to_lowercase();
 
-        assert!(first_header.contains("gone (upstream branch no longer exists) [1/2]"));
-        assert!(lines[0].contains("last commit"));
-        assert!(lines[0].contains("age"));
-        assert!(lines[1].contains("feature/delete-me"));
-        assert!(
-            second_header.contains("unpushed (no upstream tracking branch is configured) [2/2]")
-        );
+        assert_eq!(lines[0], "");
+        assert!(first_header.contains("gone (upstream branch no longer exists)"));
+        assert!(lines[2].contains("feature/delete-me"));
+        assert!(second_header.contains("unpushed (no upstream tracking branch is configured)"));
         assert!(lines[4].contains("feature/local-only"));
     }
 
@@ -1037,12 +1018,11 @@ mod tests {
         );
 
         assert!(
-            lines[0]
+            lines[1]
                 .to_lowercase()
-                .contains("closed (pull request closed on github) [1/1]")
+                .contains("closed (pull request closed on github)")
         );
-        assert!(lines[0].contains("pull request"));
-        assert!(lines[1].contains("https://example.test/pr/1"));
+        assert!(lines[2].contains("https://example.test/pr/1"));
     }
 
     #[test]

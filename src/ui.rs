@@ -4,6 +4,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{
     App, AppScreen, Branch, CleanupMode, CommandLineState, CommandPlanItem, Decision,
@@ -22,16 +23,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     let inner = block.inner(chunks[0]);
     frame.render_widget(block, chunks[0]);
 
-    let content = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(inner);
-
-    let header = Paragraph::new(render_header(app, content[0].width as usize))
-        .style(Style::default().add_modifier(Modifier::BOLD));
     match &app.screen {
         AppScreen::Triage => {
-            frame.render_widget(header, content[0]);
+            let body_area = inner;
 
             let items = app
                 .branches
@@ -43,7 +37,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
                         app,
                         branch,
                         next_section,
-                        content[1].width.saturating_sub(3) as usize,
+                        body_area.width.saturating_sub(3) as usize,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -57,12 +51,20 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
                 state.select(Some(app.selected));
             }
 
-            frame.render_stateful_widget(list, content[1], &mut state);
+            frame.render_stateful_widget(list, body_area, &mut state);
         }
         AppScreen::Review(review) => {
+            let content = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(inner);
             render_review(frame, app, review, content[0], content[1]);
         }
         AppScreen::Executing(execution) => {
+            let content = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(inner);
             render_execution(frame, app, execution, content[0], content[1]);
         }
     }
@@ -235,29 +237,6 @@ fn render_footer_right(app: &App) -> Line<'static> {
     }
 }
 
-fn render_header(app: &App, width: usize) -> Line<'static> {
-    let row_prefix_width = 5;
-    let (branch_width, secondary_width, age_width) =
-        column_widths(app.mode, width.saturating_sub(row_prefix_width));
-    let secondary_label = secondary_column_label(app.mode);
-    let mut spans = vec![
-        Span::raw(" ".repeat(row_prefix_width)),
-        Span::styled(
-            "branch name",
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::UNDERLINED),
-        ),
-        Span::raw(" ".repeat(branch_width.saturating_sub("branch name".chars().count()))),
-        Span::raw("  "),
-    ];
-    spans.extend(right_aligned_header(secondary_label, secondary_width));
-    spans.push(Span::raw("  "));
-    spans.extend(right_aligned_header("age", age_width));
-
-    Line::from(spans)
-}
-
 fn render_title(app: &App, width: usize) -> Line<'static> {
     let left_segments = [
         "  ".len(),
@@ -293,19 +272,6 @@ fn render_title(app: &App, width: usize) -> Line<'static> {
     ])
 }
 
-fn right_aligned_header(label: &'static str, width: usize) -> Vec<Span<'static>> {
-    let padding = width.saturating_sub(label.chars().count());
-    vec![
-        Span::raw(" ".repeat(padding)),
-        Span::styled(
-            label,
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::UNDERLINED),
-        ),
-    ]
-}
-
 fn render_branch(
     app: &App,
     branch: &Branch,
@@ -316,8 +282,13 @@ fn render_branch(
         Decision::Delete => ("✗", Style::default().fg(Color::Red)),
         Decision::Undecided => ("·", Style::default().fg(Color::DarkGray)),
     };
-    let (branch_width, secondary_width, age_width) =
-        column_widths(app.mode, width.saturating_sub(6));
+    let compact_age = compact_age_display(branch.committed_at);
+    let (branch_width, secondary_width) = column_widths(
+        app.mode,
+        width.saturating_sub(4),
+        &branch.display_name(),
+        &compact_age,
+    );
 
     let mut line_style = Style::default();
     if branch.decision == Decision::Delete {
@@ -343,9 +314,12 @@ fn render_branch(
             .add_modifier(Modifier::ITALIC)
     };
 
+    let branch_name_width = branch_width.saturating_sub(compact_age.chars().count() + 1);
     let mut lines = vec![Line::from(vec![
         Span::styled(format!("{} ", marker.0), marker.1),
-        Span::styled(pad(&branch.display_name(), branch_width), line_style),
+        Span::styled(pad(&branch.display_name(), branch_name_width), line_style),
+        Span::raw(" "),
+        Span::styled(compact_age, Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
         Span::styled(
             left_pad(
@@ -354,8 +328,6 @@ fn render_branch(
             ),
             secondary_style,
         ),
-        Span::raw("  "),
-        Span::styled(left_pad(&branch.relative_date, age_width), line_style),
     ])];
 
     if let Some(detail) = &branch.detail {
@@ -376,14 +348,6 @@ fn render_branch(
     ListItem::new(lines)
 }
 
-fn secondary_column_label(mode: CleanupMode) -> &'static str {
-    if mode.uses_pr_metadata() {
-        "pull request"
-    } else {
-        "last commit"
-    }
-}
-
 fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
     if mode.uses_pr_metadata() {
         branch
@@ -395,25 +359,21 @@ fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
     }
 }
 
-fn column_widths(mode: CleanupMode, width: usize) -> (usize, usize, usize) {
+fn column_widths(
+    mode: CleanupMode,
+    width: usize,
+    branch_label: &str,
+    compact_age: &str,
+) -> (usize, usize) {
     let min_branch = 12;
     let min_secondary = 12;
-    let max_age = 14;
-    let age_width = width
-        .saturating_sub(min_branch + min_secondary + 4)
-        .min(max_age);
-    let remaining = width.saturating_sub(age_width + 4);
-    let preferred_branch = if mode.uses_pr_metadata() {
-        remaining / 3
-    } else {
-        remaining * 2 / 5
-    };
-    let branch_width = preferred_branch
+    let branch_width = (branch_label.chars().count() + 1 + compact_age.chars().count())
         .max(min_branch)
-        .min(remaining.saturating_sub(min_secondary));
-    let secondary_width = remaining.saturating_sub(branch_width).max(min_secondary);
+        .min(width.saturating_sub(min_secondary + 2));
+    let secondary_width = width.saturating_sub(branch_width + 2).max(min_secondary);
 
-    (branch_width, secondary_width, age_width)
+    let _ = mode;
+    (branch_width, secondary_width)
 }
 
 fn pad(value: &str, width: usize) -> String {
@@ -448,6 +408,40 @@ fn truncate(value: &str, width: usize) -> String {
         .take(width.saturating_sub(1))
         .collect::<String>()
         + "…"
+}
+
+fn compact_age_display(committed_at: i64) -> String {
+    let age_seconds = current_unix_timestamp().saturating_sub(committed_at).max(0) as u64;
+    if age_seconds < 60 {
+        return String::from("now");
+    }
+
+    let minute = 60;
+    let hour = 60 * minute;
+    let day = 24 * hour;
+    let week = 7 * day;
+    let month = 30 * day;
+
+    if age_seconds < hour {
+        return format!("{}m", age_seconds / minute);
+    }
+    if age_seconds < day {
+        return format!("{}h", age_seconds / hour);
+    }
+    if age_seconds < week {
+        return format!("{}d", age_seconds / day);
+    }
+    if age_seconds < month {
+        return format!("{}w", age_seconds / week);
+    }
+    format!("{}mo", age_seconds / month)
+}
+
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn centered_rect(horizontal_percent: u16, vertical_percent: u16, area: Rect) -> Rect {
