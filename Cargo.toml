@@ -2,9 +2,22 @@
 name = "git-broom"
 version = "0.1.1"
 edition = "2024"
+rust-version = "1.85"
 description = "Interactive TUI for cleaning up stale local git branches"
 repository = "https://github.com/andrewlook/git-broom"
 license = "MIT"
+readme = "README.md"
+keywords = ["git", "cli", "tui", "branches", "cleanup"]
+categories = ["command-line-utilities"]
+include = [
+  "/src/**",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+]
 
 [dependencies]
 anyhow = "1"

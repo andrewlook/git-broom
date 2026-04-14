@@ -2,6 +2,12 @@
 
 `git-broom` is a small Rust CLI for cleaning up stale local git branches after squash-merge workflows leave tracking branches behind.
 
+It is designed to be safe to browse often and destructive only on purpose:
+
+- `git-broom` shows a grouped preview by default
+- `git-broom clean` enters the interactive destructive workflow
+- `--batch` and `--dry-run` are compatibility aliases for the same grouped preview
+
 Current behavior focuses on grouped branch review:
 
 - `gone`: branches whose upstream tracking ref is `[gone]`
@@ -10,9 +16,6 @@ Current behavior focuses on grouped branch review:
 - `nopr`: remote-tracked branches with no PR on GitHub
 - `closed`: remote-tracked branches whose PR is closed on GitHub
 - `merged`: remote-tracked branches whose PR is merged but whose remote branch still exists
-- `git-broom` shows a grouped preview by default
-- `git-broom clean` enters the interactive destructive workflow
-- `--batch` and `--dry-run` are compatibility aliases for the same grouped preview
 - `s` in interactive mode saves or unsaves a branch for this repo and cleanup mode
 
 ## Requirements
@@ -68,7 +71,15 @@ Saved branches stay visible in both the TUI and preview output, but `delete all`
 
 If GitHub metadata cannot be refreshed and there is no fresh cache, preview mode still shows other selected groups and prints a note that GitHub-backed metadata is unavailable.
 
-## Install from source
+## Install
+
+Once the crate is published, install it from crates.io with:
+
+```bash
+cargo install git-broom
+```
+
+If you want the latest local source checkout instead:
 
 Clone the repo, then install the binary with Cargo:
 
@@ -123,3 +134,16 @@ GitHub Actions runs:
 - `cargo test`
 
 Tests run on both Linux and macOS.
+
+## Releasing
+
+This repo supports two release paths:
+
+- first publish locally with `cargo publish --dry-run --locked` followed by `cargo publish --locked`
+- later tag-based releases through GitHub Actions by pushing a tag like `v0.1.1`
+
+The detailed maintainer workflow is documented in [docs/releasing.md](docs/releasing.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

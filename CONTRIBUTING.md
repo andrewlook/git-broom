@@ -27,3 +27,13 @@ When you ship user-facing changes:
 5. Run the verification commands above.
 
 For this repo, the changelog and version bump should move together in the same PR.
+
+## Releasing
+
+The maintainer release flow lives in [docs/releasing.md](docs/releasing.md).
+
+Use that doc for:
+
+- the first local `cargo publish`
+- the required GitHub secret setup for tag-driven releases
+- the semver tag format expected by the release workflow
