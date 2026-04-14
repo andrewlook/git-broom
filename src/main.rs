@@ -271,7 +271,7 @@ fn run_tui(repo: &Path, app: &mut App) -> Result<ExitAction> {
     loop {
         terminal.draw(|frame| git_broom::ui::render(frame, app))?;
 
-        if matches!(app.screen, AppScreen::Executing(_)) {
+        if matches!(app.screen, AppScreen::Executing(_)) && app.execution_failure().is_none() {
             let Some(index) = app.next_pending_execution_index() else {
                 return Ok(ExitAction::Completed { deleted, failed });
             };
@@ -288,14 +288,9 @@ fn run_tui(repo: &Path, app: &mut App) -> Result<ExitAction> {
 
             app.mark_execution_result(index, false);
             app.mark_execution_skipped_from(index + 1);
+            app.set_execution_failure(index, result.output);
             failed += 1;
-            terminal.draw(|frame| git_broom::ui::render(frame, app))?;
-            println!("Failed to delete {}: {}", result.branch, result.message);
-            println!(
-                "{}: deleted {} branches. {} failed. Aborted remaining cleanup commands.",
-                app.group_name, deleted, failed
-            );
-            return Ok(ExitAction::Completed { deleted, failed });
+            continue;
         }
 
         if let Event::Key(key) = event::read()? {
@@ -338,7 +333,11 @@ fn run_tui(repo: &Path, app: &mut App) -> Result<ExitAction> {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(ExitAction::Quit),
                     _ => {}
                 },
-                AppScreen::Executing(_) => {}
+                AppScreen::Executing(_) => {
+                    if app.execution_failure().is_some() && matches!(key.code, KeyCode::Enter) {
+                        return Ok(ExitAction::Completed { deleted, failed });
+                    }
+                }
             }
         }
     }

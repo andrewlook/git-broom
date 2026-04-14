@@ -332,6 +332,7 @@ pub struct ReviewState {
 #[derive(Debug, Clone)]
 pub struct ExecutionState {
     pub items: Vec<CommandPlanItem>,
+    pub failure: Option<ExecutionFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +341,13 @@ pub struct CommandPlanItem {
     pub remote_command: Option<String>,
     pub local_command: String,
     pub state: CommandLineState,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionFailure {
+    pub branch: String,
+    pub command: String,
+    pub output: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,6 +550,13 @@ impl App {
         }
     }
 
+    pub fn execution_failure(&self) -> Option<&ExecutionFailure> {
+        match &self.screen {
+            AppScreen::Executing(execution) => execution.failure.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn enter_review(&mut self) -> bool {
         let items = self
             .delete_candidates()
@@ -575,12 +590,15 @@ impl App {
             AppScreen::Review(review) => review.items.clone(),
             _ => return,
         };
-        self.screen = AppScreen::Executing(ExecutionState { items });
+        self.screen = AppScreen::Executing(ExecutionState {
+            items,
+            failure: None,
+        });
     }
 
     pub fn next_pending_execution_index(&self) -> Option<usize> {
         match &self.screen {
-            AppScreen::Executing(execution) => execution
+            AppScreen::Executing(execution) if execution.failure.is_none() => execution
                 .items
                 .iter()
                 .position(|item| item.state == CommandLineState::Pending),
@@ -614,6 +632,18 @@ impl App {
                     item.state = CommandLineState::Skipped;
                 }
             }
+        }
+    }
+
+    pub fn set_execution_failure(&mut self, index: usize, output: impl Into<String>) {
+        if let AppScreen::Executing(execution) = &mut self.screen
+            && let Some(item) = execution.items.get(index)
+        {
+            execution.failure = Some(ExecutionFailure {
+                branch: item.branch.name.clone(),
+                command: item.plain_command(),
+                output: output.into(),
+            });
         }
     }
 }
@@ -669,6 +699,7 @@ pub struct DeleteResult {
     pub branch: String,
     pub success: bool,
     pub message: String,
+    pub output: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1319,6 +1350,7 @@ fn delete_closed_branch(repo: &Path, remote: &str, branch: &Branch) -> DeleteRes
             branch: branch.name.clone(),
             success: false,
             message: String::from("branch has no remote tracking branch"),
+            output: String::from("branch has no remote tracking branch"),
         };
     };
 
@@ -1329,18 +1361,20 @@ fn delete_closed_branch(repo: &Path, remote: &str, branch: &Branch) -> DeleteRes
         .output()
     {
         Ok(output) if output.status.success() => delete_local_branch(repo, branch),
-        Ok(output) => DeleteResult {
-            branch: branch.name.clone(),
-            success: false,
-            message: format!(
-                "git push {remote} {remote_ref} failed: {}",
-                command_message(&output)
-            ),
-        },
+        Ok(output) => {
+            let output_text = command_message(&output);
+            DeleteResult {
+                branch: branch.name.clone(),
+                success: false,
+                message: format!("git push {remote} {remote_ref} failed"),
+                output: output_text,
+            }
+        }
         Err(error) => DeleteResult {
             branch: branch.name.clone(),
             success: false,
             message: error.to_string(),
+            output: error.to_string(),
         },
     }
 }
@@ -1355,20 +1389,22 @@ fn delete_local_branch(repo: &Path, branch: &Branch) -> DeleteResult {
             branch: branch.name.clone(),
             success: true,
             message: command_message(&output),
+            output: command_message(&output),
         },
-        Ok(output) => DeleteResult {
-            branch: branch.name.clone(),
-            success: false,
-            message: format!(
-                "git branch -D {} failed: {}",
-                branch.name,
-                command_message(&output)
-            ),
-        },
+        Ok(output) => {
+            let output_text = command_message(&output);
+            DeleteResult {
+                branch: branch.name.clone(),
+                success: false,
+                message: format!("git branch -D {} failed", branch.name),
+                output: output_text,
+            }
+        }
         Err(error) => DeleteResult {
             branch: branch.name.clone(),
             success: false,
             message: error.to_string(),
+            output: error.to_string(),
         },
     }
 }
@@ -1964,6 +2000,40 @@ mod tests {
             items[0].plain_command(),
             "git push origin :refs/heads/feature/foo && git branch -D feature/foo"
         );
+    }
+
+    #[test]
+    fn set_execution_failure_records_output_and_stops_progression() {
+        let mut branch = parse_branch_line(
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        branch.decision = Decision::Delete;
+
+        let mut app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Closed, vec![branch]),
+            "origin",
+            1,
+            1,
+        );
+
+        assert!(app.enter_review());
+        app.begin_execution();
+        app.set_execution_failure(0, "fatal: remote ref does not exist");
+
+        let failure = app.execution_failure().expect("failure captured");
+        assert_eq!(failure.branch, "feature/foo");
+        assert_eq!(
+            failure.command,
+            "git push origin :refs/heads/feature/foo && git branch -D feature/foo"
+        );
+        assert_eq!(failure.output, "fatal: remote ref does not exist");
+        assert_eq!(app.next_pending_execution_index(), None);
     }
 
     #[test]

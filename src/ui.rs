@@ -117,18 +117,51 @@ fn render_execution(
     header_area: Rect,
     body_area: Rect,
 ) {
-    let summary = Paragraph::new(Line::from(vec![Span::styled(
-        "Executing cleanup commands...",
-        Style::default().add_modifier(Modifier::BOLD),
-    )]));
+    let summary_text = if execution.failure.is_some() {
+        "Cleanup failed"
+    } else {
+        "Executing cleanup commands..."
+    };
+    let summary_style = if execution.failure.is_some() {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    let summary = Paragraph::new(Line::from(vec![Span::styled(summary_text, summary_style)]));
     frame.render_widget(summary, header_area);
+
+    let body_chunks = if execution.failure.is_some() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(body_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1)])
+            .split(body_area)
+    };
 
     let items = execution
         .items
         .iter()
         .map(render_execution_command)
         .collect::<Vec<_>>();
-    frame.render_widget(List::new(items), body_area);
+    frame.render_widget(List::new(items), body_chunks[0]);
+
+    if let Some(failure) = &execution.failure {
+        let error = Paragraph::new(render_failure_output(failure))
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        format!("Failed: {}", failure.branch),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(error, body_chunks[1]);
+    }
 }
 
 fn render_review_summary(app: &App, count: usize) -> Line<'static> {
@@ -219,6 +252,9 @@ fn render_footer_left(app: &App) -> Line<'static> {
             key_hint("q"),
             desc_hint(" (quit)"),
         ]),
+        AppScreen::Executing(execution) if execution.failure.is_some() => {
+            Line::from(vec![desc_hint("cleanup failed; review the error below")])
+        }
         AppScreen::Executing(_) => Line::from(vec![desc_hint("running cleanup commands...")]),
     }
 }
@@ -233,8 +269,41 @@ fn render_footer_right(app: &App) -> Line<'static> {
             )])
         }
         AppScreen::Review(_) => Line::from(vec![key_hint("y / n"), desc_hint(" (confirm / back)")]),
+        AppScreen::Executing(execution) if execution.failure.is_some() => {
+            Line::from(vec![key_hint("enter"), desc_hint(" (exit)")])
+        }
         AppScreen::Executing(_) => Line::from(vec![]),
     }
+}
+
+fn render_failure_output(failure: &crate::app::ExecutionFailure) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "command: ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(failure.command.clone(), Style::default().fg(Color::Red)),
+    ])];
+
+    lines.push(Line::from(""));
+
+    for line in failure.output.lines() {
+        lines.push(Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    if failure.output.lines().next().is_none() {
+        lines.push(Line::from(Span::styled(
+            "command failed with no output",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    lines
 }
 
 fn render_title(app: &App, width: usize) -> Line<'static> {
