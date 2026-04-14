@@ -249,7 +249,7 @@ fn run_preview(outcome: &ScanOutcome) -> Result<()> {
 
 fn print_scan_notes(notes: &[String]) {
     for note in notes {
-        if io::stdout().is_terminal() {
+        if stdout_supports_styling() {
             println!("{} {}", "Note:".yellow().bold(), note.as_str().dark_grey());
         } else {
             println!("Note: {note}");
@@ -505,7 +505,7 @@ fn preview_total_width(branch_width: usize, commit_width: usize) -> usize {
 }
 
 fn preview_width() -> usize {
-    if io::stdout().is_terminal() {
+    if stdout_supports_styling() {
         size().map(|(width, _)| width as usize).unwrap_or(80)
     } else {
         80
@@ -519,7 +519,7 @@ fn format_group_header(
     _step_count: usize,
 ) -> String {
     let plain = format!("{group_name} ({group_description})");
-    if !io::stdout().is_terminal() {
+    if !stdout_supports_styling() {
         return plain;
     }
 
@@ -538,7 +538,7 @@ fn format_group_header(
 }
 
 fn style_branch_preview(branch: &Branch, value: &str) -> String {
-    if !io::stdout().is_terminal() {
+    if !stdout_supports_styling() {
         return value.to_string();
     }
 
@@ -550,7 +550,7 @@ fn style_branch_preview(branch: &Branch, value: &str) -> String {
 }
 
 fn style_secondary_preview(branch: &Branch, mode: CleanupMode, value: &str) -> String {
-    if !io::stdout().is_terminal() {
+    if !stdout_supports_styling() {
         return value.to_string();
     }
 
@@ -575,11 +575,15 @@ fn style_secondary_preview(branch: &Branch, mode: CleanupMode, value: &str) -> S
 }
 
 fn style_age_preview(value: &str) -> String {
-    if !io::stdout().is_terminal() {
+    if !stdout_supports_styling() {
         return value.to_string();
     }
 
     format!("{}", value.dark_grey())
+}
+
+fn stdout_supports_styling() -> bool {
+    !cfg!(test) && io::stdout().is_terminal()
 }
 
 fn group_header_color(group_name: &str) -> crossterm::style::Color {

@@ -5,8 +5,14 @@
 Before the first publish:
 
 1. Make sure the crate name is still available on crates.io.
-2. Confirm `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md` are aligned to the version you want to publish.
-3. Run the normal verification commands:
+2. Draft the next changelog section from merged PRs since the last tag:
+
+```bash
+./scripts/draft-release-changelog.sh 0.1.2
+```
+
+3. Curate that output into `CHANGELOG.md`, then confirm `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md` are aligned to the version you want to publish.
+4. Run the normal verification commands:
 
 ```bash
 cargo fmt --all
@@ -14,26 +20,26 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-4. Inspect the packaged crate contents:
+5. Inspect the packaged crate contents:
 
 ```bash
 cargo package --list
 ```
 
-5. Validate the publish without uploading:
+6. Validate the publish without uploading:
 
 ```bash
 cargo publish --dry-run --locked
 ```
 
-6. Publish from your local machine:
+7. Publish from your local machine:
 
 ```bash
 cargo login
 cargo publish --locked
 ```
 
-7. Tag the released commit:
+8. Tag the released commit:
 
 ```bash
 git tag v0.1.1
@@ -55,8 +61,14 @@ Add this repository secret:
 ### Release flow
 
 1. Update `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
-2. Merge the release commit to `main`.
-3. Create and push a semver tag that matches the manifest version:
+2. A helper script can draft the PR list for that changelog section:
+
+```bash
+./scripts/draft-release-changelog.sh 0.1.2
+```
+
+3. Merge the release commit to `main`.
+4. Create and push a semver tag that matches the manifest version:
 
 ```bash
 git tag v0.1.2
