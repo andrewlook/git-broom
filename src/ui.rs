@@ -5,7 +5,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, Branch, CleanupMode, Decision};
+use crate::app::{
+    App, AppScreen, Branch, CleanupMode, CommandLineState, CommandPlanItem, Decision,
+};
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let chunks = Layout::default()
@@ -27,60 +29,53 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     let header = Paragraph::new(render_header(app, content[0].width as usize))
         .style(Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(header, content[0]);
+    match &app.screen {
+        AppScreen::Triage => {
+            frame.render_widget(header, content[0]);
 
-    let items = app
-        .branches
-        .iter()
-        .enumerate()
-        .map(|(index, branch)| {
-            let next_section = app.branches.get(index + 1).map(Branch::section);
-            render_branch(
-                app,
-                branch,
-                next_section,
-                content[1].width.saturating_sub(3) as usize,
-            )
-        })
-        .collect::<Vec<_>>();
+            let items = app
+                .branches
+                .iter()
+                .enumerate()
+                .map(|(index, branch)| {
+                    let next_section = app.branches.get(index + 1).map(Branch::section);
+                    render_branch(
+                        app,
+                        branch,
+                        next_section,
+                        content[1].width.saturating_sub(3) as usize,
+                    )
+                })
+                .collect::<Vec<_>>();
 
-    let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol(">> ");
+            let list = List::new(items)
+                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+                .highlight_symbol(">> ");
 
-    let mut state = ListState::default();
-    if !app.is_empty() {
-        state.select(Some(app.selected));
+            let mut state = ListState::default();
+            if !app.is_empty() {
+                state.select(Some(app.selected));
+            }
+
+            frame.render_stateful_widget(list, content[1], &mut state);
+        }
+        AppScreen::Review(review) => {
+            render_review(frame, app, review, content[0], content[1]);
+        }
+        AppScreen::Executing(execution) => {
+            render_execution(frame, app, execution, content[0], content[1]);
+        }
     }
-
-    frame.render_stateful_widget(list, content[1], &mut state);
 
     let footer_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(1), Constraint::Length(28)])
         .split(chunks[1]);
 
-    let footer_left = Paragraph::new(Line::from(vec![
-        key_hint("j / k"),
-        desc_hint(" (up / down)  "),
-        key_hint("d"),
-        desc_hint(" (delete)  "),
-        key_hint("s"),
-        desc_hint(" (save)  "),
-        key_hint("a"),
-        desc_hint(" (delete all)  "),
-        key_hint("u"),
-        desc_hint(" (clear deletions)  "),
-        key_hint("q"),
-        desc_hint(" (quit)"),
-    ]));
+    let footer_left = Paragraph::new(render_footer_left(app));
     frame.render_widget(footer_left, footer_chunks[0]);
 
-    let footer_right = Paragraph::new(Line::from(vec![
-        key_hint("enter"),
-        desc_hint(" (review deletions)"),
-    ]))
-    .alignment(Alignment::Right);
+    let footer_right = Paragraph::new(render_footer_right(app)).alignment(Alignment::Right);
     frame.render_widget(footer_right, footer_chunks[1]);
 
     if let Some(modal) = &app.modal {
@@ -91,6 +86,152 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true });
         frame.render_widget(dialog, area);
+    }
+}
+
+fn render_review(
+    frame: &mut Frame<'_>,
+    app: &App,
+    review: &crate::app::ReviewState,
+    header_area: Rect,
+    body_area: Rect,
+) {
+    let summary =
+        Paragraph::new(render_review_summary(app, review.items.len())).wrap(Wrap { trim: true });
+    frame.render_widget(summary, header_area);
+
+    let items = review
+        .items
+        .iter()
+        .map(render_review_command)
+        .collect::<Vec<_>>();
+    frame.render_widget(List::new(items), body_area);
+}
+
+fn render_execution(
+    frame: &mut Frame<'_>,
+    _app: &App,
+    execution: &crate::app::ExecutionState,
+    header_area: Rect,
+    body_area: Rect,
+) {
+    let summary = Paragraph::new(Line::from(vec![Span::styled(
+        "Executing cleanup commands...",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    frame.render_widget(summary, header_area);
+
+    let items = execution
+        .items
+        .iter()
+        .map(render_execution_command)
+        .collect::<Vec<_>>();
+    frame.render_widget(List::new(items), body_area);
+}
+
+fn render_review_summary(app: &App, count: usize) -> Line<'static> {
+    let noun = if count == 1 { "branch" } else { "branches" };
+    Line::from(vec![
+        Span::raw("About to run cleanup commands for "),
+        Span::styled(
+            format!("{count} {} {noun}", app.group_name),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("({})", app.group_description),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
+        Span::raw(":"),
+    ])
+}
+
+fn render_review_command(item: &CommandPlanItem) -> ListItem<'static> {
+    let mut spans = vec![Span::raw("  ")];
+    if let Some(remote_command) = &item.remote_command {
+        spans.push(Span::styled(
+            remote_command.clone(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" && ", Style::default().fg(Color::DarkGray)));
+    }
+    spans.push(Span::styled(
+        item.local_command.clone(),
+        Style::default().fg(Color::Yellow),
+    ));
+
+    ListItem::new(Line::from(spans))
+}
+
+fn render_execution_command(item: &CommandPlanItem) -> ListItem<'static> {
+    let (prefix, command_style) = match item.state {
+        CommandLineState::Pending => ("  ", Style::default()),
+        CommandLineState::Success => (
+            "✓ ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::CROSSED_OUT),
+        ),
+        CommandLineState::Failed => ("x ", Style::default().fg(Color::Red)),
+        CommandLineState::Skipped => ("- ", Style::default().fg(Color::DarkGray)),
+    };
+
+    let prefix_style = match item.state {
+        CommandLineState::Success => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        CommandLineState::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        CommandLineState::Skipped => Style::default().fg(Color::DarkGray),
+        CommandLineState::Pending => Style::default(),
+    };
+
+    ListItem::new(Line::from(vec![
+        Span::styled(prefix, prefix_style),
+        Span::styled(item.plain_command(), command_style),
+    ]))
+}
+
+fn render_footer_left(app: &App) -> Line<'static> {
+    match &app.screen {
+        AppScreen::Triage => Line::from(vec![
+            key_hint("j / k"),
+            desc_hint(" (up / down)  "),
+            key_hint("d"),
+            desc_hint(" (delete)  "),
+            key_hint("s"),
+            desc_hint(" (save)  "),
+            key_hint("a"),
+            desc_hint(" (delete all)  "),
+            key_hint("u"),
+            desc_hint(" (clear deletions)  "),
+            key_hint("q"),
+            desc_hint(" (quit)"),
+        ]),
+        AppScreen::Review(_) => Line::from(vec![
+            key_hint("y"),
+            desc_hint(" (confirm)  "),
+            key_hint("n"),
+            desc_hint(" (back)  "),
+            key_hint("q"),
+            desc_hint(" (quit)"),
+        ]),
+        AppScreen::Executing(_) => Line::from(vec![desc_hint("running cleanup commands...")]),
+    }
+}
+
+fn render_footer_right(app: &App) -> Line<'static> {
+    match &app.screen {
+        AppScreen::Triage => Line::from(vec![key_hint("enter"), desc_hint(" (review deletions)")]),
+        AppScreen::Review(review) if review.require_explicit_choice => {
+            Line::from(vec![Span::styled(
+                "y or n required",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )])
+        }
+        AppScreen::Review(_) => Line::from(vec![key_hint("y / n"), desc_hint(" (confirm / back)")]),
+        AppScreen::Executing(_) => Line::from(vec![]),
     }
 }
 

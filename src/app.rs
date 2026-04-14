@@ -299,12 +299,14 @@ impl CleanupGroup {
 #[derive(Debug, Clone)]
 pub struct App {
     pub mode: CleanupMode,
+    pub remote: String,
     pub group_name: String,
     pub group_description: String,
     pub step_index: usize,
     pub step_count: usize,
     pub branches: Vec<Branch>,
     pub selected: usize,
+    pub screen: AppScreen,
     pub modal: Option<Modal>,
 }
 
@@ -314,17 +316,58 @@ pub struct Modal {
     pub message: String,
 }
 
+#[derive(Debug, Clone)]
+pub enum AppScreen {
+    Triage,
+    Review(ReviewState),
+    Executing(ExecutionState),
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewState {
+    pub items: Vec<CommandPlanItem>,
+    pub require_explicit_choice: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionState {
+    pub items: Vec<CommandPlanItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandPlanItem {
+    pub branch: Branch,
+    pub remote_command: Option<String>,
+    pub local_command: String,
+    pub state: CommandLineState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandLineState {
+    Pending,
+    Success,
+    Failed,
+    Skipped,
+}
+
 impl App {
-    pub fn from_group(group: CleanupGroup, step_index: usize, step_count: usize) -> Self {
+    pub fn from_group(
+        group: CleanupGroup,
+        remote: impl Into<String>,
+        step_index: usize,
+        step_count: usize,
+    ) -> Self {
         let selected = initial_selection(&group.branches);
         Self {
             mode: group.mode,
+            remote: remote.into(),
             group_name: group.name,
             group_description: group.description,
             step_index,
             step_count,
             branches: group.branches,
             selected,
+            screen: AppScreen::Triage,
             modal: None,
         }
     }
@@ -473,6 +516,152 @@ impl App {
     pub fn dismiss_modal(&mut self) {
         self.modal = None;
     }
+
+    pub fn in_triage(&self) -> bool {
+        matches!(self.screen, AppScreen::Triage)
+    }
+
+    pub fn review_items(&self) -> Option<&[CommandPlanItem]> {
+        match &self.screen {
+            AppScreen::Review(review) => Some(&review.items),
+            _ => None,
+        }
+    }
+
+    pub fn review_requires_explicit_choice(&self) -> bool {
+        match &self.screen {
+            AppScreen::Review(review) => review.require_explicit_choice,
+            _ => false,
+        }
+    }
+
+    pub fn execution_items(&self) -> Option<&[CommandPlanItem]> {
+        match &self.screen {
+            AppScreen::Executing(execution) => Some(&execution.items),
+            _ => None,
+        }
+    }
+
+    pub fn enter_review(&mut self) -> bool {
+        let items = self
+            .delete_candidates()
+            .into_iter()
+            .map(|branch| CommandPlanItem::new(self.mode, &self.remote, branch))
+            .collect::<Vec<_>>();
+
+        if items.is_empty() {
+            return false;
+        }
+
+        self.screen = AppScreen::Review(ReviewState {
+            items,
+            require_explicit_choice: false,
+        });
+        true
+    }
+
+    pub fn exit_review(&mut self) {
+        self.screen = AppScreen::Triage;
+    }
+
+    pub fn require_review_confirmation(&mut self) {
+        if let AppScreen::Review(review) = &mut self.screen {
+            review.require_explicit_choice = true;
+        }
+    }
+
+    pub fn begin_execution(&mut self) {
+        let items = match &self.screen {
+            AppScreen::Review(review) => review.items.clone(),
+            _ => return,
+        };
+        self.screen = AppScreen::Executing(ExecutionState { items });
+    }
+
+    pub fn next_pending_execution_index(&self) -> Option<usize> {
+        match &self.screen {
+            AppScreen::Executing(execution) => execution
+                .items
+                .iter()
+                .position(|item| item.state == CommandLineState::Pending),
+            _ => None,
+        }
+    }
+
+    pub fn execution_branch(&self, index: usize) -> Option<&Branch> {
+        match &self.screen {
+            AppScreen::Executing(execution) => execution.items.get(index).map(|item| &item.branch),
+            _ => None,
+        }
+    }
+
+    pub fn mark_execution_result(&mut self, index: usize, success: bool) {
+        if let AppScreen::Executing(execution) = &mut self.screen
+            && let Some(item) = execution.items.get_mut(index)
+        {
+            item.state = if success {
+                CommandLineState::Success
+            } else {
+                CommandLineState::Failed
+            };
+        }
+    }
+
+    pub fn mark_execution_skipped_from(&mut self, start: usize) {
+        if let AppScreen::Executing(execution) = &mut self.screen {
+            for item in execution.items.iter_mut().skip(start) {
+                if item.state == CommandLineState::Pending {
+                    item.state = CommandLineState::Skipped;
+                }
+            }
+        }
+    }
+}
+
+impl CommandPlanItem {
+    pub fn new(mode: CleanupMode, remote: &str, branch: &Branch) -> Self {
+        let local_command = format!("git branch -D {}", shell_quote(&branch.name));
+        let remote_command = if mode.uses_pr_metadata() && mode.is_cleanable() {
+            branch.upstream_branch_name().map(|remote_branch| {
+                format!(
+                    "git push {} :refs/heads/{}",
+                    shell_quote(remote),
+                    shell_quote(remote_branch)
+                )
+            })
+        } else {
+            None
+        };
+
+        Self {
+            branch: branch.clone(),
+            remote_command,
+            local_command,
+            state: CommandLineState::Pending,
+        }
+    }
+
+    pub fn plain_command(&self) -> String {
+        match &self.remote_command {
+            Some(remote_command) => format!("{remote_command} && {}", self.local_command),
+            None => self.local_command.clone(),
+        }
+    }
+}
+
+pub fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return String::from("''");
+    }
+
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.' | ':'))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[derive(Debug, Clone)]
@@ -1462,9 +1651,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        App, Branch, BranchSection, CleanupGroup, CleanupMode, Decision, FIELD_SEPARATOR,
-        Protection, chunk_summary, closed_candidate_heads, format_age_from_seconds,
-        parse_branch_line,
+        App, AppScreen, Branch, BranchSection, CleanupGroup, CleanupMode, Decision,
+        FIELD_SEPARATOR, Protection, chunk_summary, closed_candidate_heads,
+        format_age_from_seconds, parse_branch_line,
     };
 
     const SAMPLE_TIMESTAMP: &str = "1700000000";
@@ -1564,6 +1753,7 @@ mod tests {
         .expect("branch parsed");
         let mut app = App::from_group(
             CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
+            "origin",
             1,
             1,
         );
@@ -1588,6 +1778,7 @@ mod tests {
         .expect("branch parsed");
         let mut app = App::from_group(
             CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
+            "origin",
             1,
             1,
         );
@@ -1618,6 +1809,7 @@ mod tests {
         branch.saved = true;
         let mut app = App::from_group(
             CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
+            "origin",
             1,
             1,
         );
@@ -1666,6 +1858,7 @@ mod tests {
 
         let app = App::from_group(
             CleanupGroup::from_mode(CleanupMode::Gone, vec![protected, saved, regular]),
+            "origin",
             1,
             1,
         );
@@ -1696,6 +1889,7 @@ mod tests {
         .expect("branch parsed");
         let mut app = App::from_group(
             CleanupGroup::from_mode(CleanupMode::Gone, vec![first, second]),
+            "origin",
             1,
             1,
         );
@@ -1710,6 +1904,65 @@ mod tests {
         assert_eq!(
             app.saved_branch_names(),
             vec![String::from("feature/second")]
+        );
+    }
+
+    #[test]
+    fn enter_review_requires_explicit_y_or_n_after_enter() {
+        let mut branch = parse_branch_line(
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}[gone]{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        branch.decision = Decision::Delete;
+
+        let mut app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
+            "origin",
+            1,
+            1,
+        );
+
+        assert!(app.enter_review());
+        assert!(matches!(app.screen, AppScreen::Review(_)));
+        assert!(!app.review_requires_explicit_choice());
+
+        app.require_review_confirmation();
+        assert!(app.review_requires_explicit_choice());
+    }
+
+    #[test]
+    fn begin_execution_builds_command_plan_for_deleted_branch() {
+        let mut branch = parse_branch_line(
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        branch.decision = Decision::Delete;
+
+        let mut app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Closed, vec![branch]),
+            "origin",
+            1,
+            1,
+        );
+
+        assert!(app.enter_review());
+        app.begin_execution();
+
+        let items = app.execution_items().expect("execution items available");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].plain_command(),
+            "git push origin :refs/heads/feature/foo && git branch -D feature/foo"
         );
     }
 
