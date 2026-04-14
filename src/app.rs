@@ -183,6 +183,16 @@ impl Protection {
         }
     }
 
+    pub fn badge_label(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Worktree => "worktree",
+            Self::Main => "main",
+            Self::Master => "master",
+            Self::DefaultBranch => "default",
+        }
+    }
+
     pub fn ineligible_message(self) -> &'static str {
         match self {
             Self::Current => "Current branch is ineligible for cleanup.",
@@ -234,7 +244,7 @@ impl Branch {
         let mut labels = self
             .protections
             .iter()
-            .map(|protection| format!("({})", protection.label()))
+            .map(|protection| format!("[{}]", protection.badge_label()))
             .collect::<Vec<_>>();
         if self.saved {
             labels.push(String::from("(saved)"));
@@ -1743,7 +1753,7 @@ mod tests {
 
         assert_eq!(branch.decision, Decision::Undecided);
         assert_eq!(branch.protections, vec![Protection::Current]);
-        assert!(branch.display_name().contains("(current branch)"));
+        assert!(branch.display_name().contains("[current]"));
     }
 
     #[test]
