@@ -138,11 +138,33 @@ fn dry_run_groups_closed_mode_by_reason() {
     repo.create_remote_tracked_branch("feature/no-pr", "origin");
 
     let fake_gh_dir = repo.install_fake_gh(
-        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"},{"number":2,"title":"Merged PR","state":"MERGED","headRefName":"feature/merged","url":"https://example.test/pr/2"},{"number":3,"title":"Open PR","state":"OPEN","headRefName":"feature/open","url":"https://example.test/pr/3"}]"#,
+        r#"[
+  {
+    "number": 1,
+    "title": "Closed PR",
+    "state": "CLOSED",
+    "headRefName": "feature/closed",
+    "url": "https://example.test/pr/1"
+  },
+  {
+    "number": 2,
+    "title": "Merged PR",
+    "state": "MERGED",
+    "headRefName": "feature/merged",
+    "url": "https://example.test/pr/2"
+  },
+  {
+    "number": 3,
+    "title": "Open PR",
+    "state": "OPEN",
+    "headRefName": "feature/open",
+    "url": "https://example.test/pr/3"
+  }
+]"#,
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["--groups", "closed", "--dry-run"])
+        .args(["--groups", "pr,nopr,closed,merged", "--dry-run"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
@@ -156,17 +178,65 @@ fn dry_run_groups_closed_mode_by_reason() {
     );
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("PR"));
+    assert!(stdout.contains("feature/open"));
+    assert!(stdout.contains("https://example.test/pr/3"));
     assert!(stdout.contains("closed"));
     assert!(stdout.contains("pull request"));
     assert!(stdout.contains("feature/closed"));
     assert!(stdout.contains("https://example.test/pr/1"));
-    assert!(stdout.contains("no-pr"));
+    assert!(stdout.contains("No PR"));
     assert!(stdout.contains("no PR"));
     assert!(stdout.contains("feature/no-pr"));
     assert!(stdout.contains("merged"));
     assert!(stdout.contains("feature/merged"));
     assert!(stdout.contains("https://example.test/pr/2"));
-    assert!(!stdout.contains("feature/open"));
+}
+
+#[test]
+fn pr_backed_groups_render_once_each() {
+    let repo = TestRepo::new();
+    repo.create_remote_tracked_branch("feature/closed", "origin");
+    repo.create_remote_tracked_branch("feature/open", "origin");
+    repo.create_remote_tracked_branch("feature/no-pr", "origin");
+
+    let fake_gh_dir = repo.install_fake_gh(
+        r#"[
+  {
+    "number": 1,
+    "title": "Closed PR",
+    "state": "CLOSED",
+    "headRefName": "feature/closed",
+    "url": "https://example.test/pr/1"
+  },
+  {
+    "number": 2,
+    "title": "Open PR",
+    "state": "OPEN",
+    "headRefName": "feature/open",
+    "url": "https://example.test/pr/2"
+  }
+]"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "pr,nopr,closed"])
+        .current_dir(repo.local_path())
+        .env("PATH", path_with_prefix(&fake_gh_dir))
+        .output()
+        .expect("git-broom runs");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.match_indices("feature/open").count(), 1);
+    assert_eq!(stdout.match_indices("feature/no-pr").count(), 1);
+    assert_eq!(stdout.match_indices("feature/closed").count(), 1);
 }
 
 #[test]
@@ -193,12 +263,35 @@ fn default_command_prints_grouped_preview_without_prompting_for_cleanup() {
 }
 
 #[test]
+fn clean_rejects_preview_only_pr_group() {
+    let repo = TestRepo::new();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["clean", "--groups", "pr"])
+        .current_dir(repo.local_path())
+        .output()
+        .expect("git-broom runs");
+
+    assert!(!output.status.success(), "clean should reject pr group");
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("`pr` is a preview-only group"));
+}
+
+#[test]
 fn closed_preview_writes_pr_cache_and_reuses_it_without_hitting_gh() {
     let repo = TestRepo::new();
     repo.create_remote_tracked_branch("feature/closed", "origin");
 
     let fake_gh_dir = repo.install_fake_gh(
-        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"}]"#,
+        r#"[
+  {
+    "number": 1,
+    "title": "Closed PR",
+    "state": "CLOSED",
+    "headRefName": "feature/closed",
+    "url": "https://example.test/pr/1"
+  }
+]"#,
     );
 
     let first = Command::new(env!("CARGO_BIN_EXE_git-broom"))
@@ -230,7 +323,7 @@ fn closed_preview_writes_pr_cache_and_reuses_it_without_hitting_gh() {
 
     let second_stdout = String::from_utf8(second.stdout).expect("utf8 stdout");
     assert!(second_stdout.contains("https://example.test/pr/1"));
-    assert!(!second_stdout.contains("closed metadata unavailable"));
+    assert!(!second_stdout.contains("GitHub metadata unavailable"));
 }
 
 #[test]
@@ -239,7 +332,15 @@ fn stale_closed_preview_cache_is_not_trusted() {
     repo.create_remote_tracked_branch("feature/closed", "origin");
 
     let fake_gh_dir = repo.install_fake_gh(
-        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"}]"#,
+        r#"[
+  {
+    "number": 1,
+    "title": "Closed PR",
+    "state": "CLOSED",
+    "headRefName": "feature/closed",
+    "url": "https://example.test/pr/1"
+  }
+]"#,
     );
 
     let first = Command::new(env!("CARGO_BIN_EXE_git-broom"))
@@ -281,7 +382,7 @@ fn stale_closed_preview_cache_is_not_trusted() {
     );
 
     let second_stdout = String::from_utf8(second.stdout).expect("utf8 stdout");
-    assert!(second_stdout.contains("Note: closed metadata unavailable"));
+    assert!(second_stdout.contains("Note: GitHub metadata unavailable"));
     assert!(!second_stdout.contains("https://example.test/pr/1"));
 }
 
@@ -294,7 +395,15 @@ fn malformed_closed_preview_cache_is_ignored_and_refreshed() {
     fs::write(&cache_path, "{not valid json").expect("broken cache written");
 
     let fake_gh_dir = repo.install_fake_gh(
-        r#"[{"number":1,"title":"Closed PR","state":"CLOSED","headRefName":"feature/closed","url":"https://example.test/pr/1"}]"#,
+        r#"[
+  {
+    "number": 1,
+    "title": "Closed PR",
+    "state": "CLOSED",
+    "headRefName": "feature/closed",
+    "url": "https://example.test/pr/1"
+  }
+]"#,
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
@@ -313,7 +422,7 @@ fn malformed_closed_preview_cache_is_ignored_and_refreshed() {
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert!(stdout.contains("https://example.test/pr/1"));
-    assert!(stdout.contains("Note: ignoring unreadable closed metadata cache"));
+    assert!(stdout.contains("Note: ignoring unreadable GitHub metadata cache"));
 }
 
 #[test]
@@ -340,7 +449,7 @@ fn preview_degrades_gracefully_when_closed_metadata_is_unavailable() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert!(stdout.contains("gone"));
     assert!(stdout.contains("feature/gone"));
-    assert!(stdout.contains("Note: closed metadata unavailable"));
+    assert!(stdout.contains("Note: GitHub metadata unavailable"));
     assert!(!stdout.contains("feature/closed"));
 }
 
@@ -371,11 +480,17 @@ fn closed_mode_excludes_open_prs_found_via_head_search() {
 
     let fake_gh_dir = repo.install_fake_gh_with_head_search(
         "feature/open",
-        r#"[{"state":"OPEN","headRefName":"feature/open","url":"https://example.test/pr/open"}]"#,
+        r#"[
+  {
+    "state": "OPEN",
+    "headRefName": "feature/open",
+    "url": "https://example.test/pr/open"
+  }
+]"#,
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["--groups", "closed", "--dry-run"])
+        .args(["--groups", "nopr", "--dry-run"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
@@ -402,11 +517,17 @@ fn closed_mode_excludes_merged_branches_whose_remote_is_already_gone() {
 
     let fake_gh_dir = repo.install_fake_gh_with_head_search(
         "feature/merged-gone",
-        r#"[{"state":"MERGED","headRefName":"feature/merged-gone","url":"https://example.test/pr/merged"}]"#,
+        r#"[
+  {
+    "state": "MERGED",
+    "headRefName": "feature/merged-gone",
+    "url": "https://example.test/pr/merged"
+  }
+]"#,
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["--groups", "closed", "--dry-run"])
+        .args(["--groups", "merged", "--dry-run"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()

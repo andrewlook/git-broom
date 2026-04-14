@@ -15,8 +15,8 @@ use crossterm::terminal::{
     enable_raw_mode, size,
 };
 use git_broom::app::{
-    App, Branch, CleanupGroup, CleanupMode, IMPLEMENTED_MODES, ScanOptions, ScanOutcome,
-    ScanProgress, delete_branch, scan_with_options,
+    App, Branch, CleanupGroup, CleanupMode, DEFAULT_CLEAN_GROUPS, DEFAULT_PREVIEW_GROUPS,
+    ScanOptions, ScanOutcome, ScanProgress, delete_branch, scan_with_options,
 };
 use git_broom::keep_store::KeepStore;
 use ratatui::Terminal;
@@ -38,7 +38,7 @@ fn run() -> Result<()> {
             ScanOptions::preview(&cli.modes, &cli.remote),
             |_, _| {},
         )?,
-        CliIntent::Clean if cli.modes.contains(&CleanupMode::Closed) => {
+        CliIntent::Clean if cli.modes.iter().copied().any(CleanupMode::uses_pr_metadata) => {
             let mut status = ScanStatusLine::new();
             let outcome = scan_with_options(
                 &repo,
@@ -128,12 +128,22 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
     }
 
     if modes.is_empty() {
-        modes = IMPLEMENTED_MODES.to_vec();
+        modes = match intent {
+            CliIntent::Preview => DEFAULT_PREVIEW_GROUPS.to_vec(),
+            CliIntent::Clean => DEFAULT_CLEAN_GROUPS.to_vec(),
+        };
     }
 
     if intent == CliIntent::Clean && saw_preview_alias {
         bail!(
             "`git-broom clean` is destructive. Remove `--dry-run` / `--batch`, or run `git-broom` without `clean` to preview groups.\n\n{}",
+            usage_text()
+        );
+    }
+
+    if intent == CliIntent::Clean && modes.iter().any(|mode| !mode.is_cleanable()) {
+        bail!(
+            "`pr` is a preview-only group. Remove it from `git-broom clean`, or run `git-broom --groups pr` to browse open-PR branches.\n\n{}",
             usage_text()
         );
     }
@@ -602,7 +612,7 @@ fn style_secondary_preview(branch: &Branch, mode: CleanupMode, value: &str) -> S
     }
 
     match mode {
-        CleanupMode::Closed if branch.pr_url.is_some() => {
+        mode if mode.uses_pr_metadata() && branch.pr_url.is_some() => {
             let trimmed = value.trim_start();
             let padding = " ".repeat(
                 value
@@ -612,7 +622,7 @@ fn style_secondary_preview(branch: &Branch, mode: CleanupMode, value: &str) -> S
             );
             format!("{padding}{}", trimmed.blue().underlined())
         }
-        CleanupMode::Closed => format!("{}", value.dark_grey()),
+        mode if mode.uses_pr_metadata() => format!("{}", value.dark_grey()),
         _ => match branch.section() {
             git_broom::app::BranchSection::Protected => format!("{}", value.dark_grey().italic()),
             git_broom::app::BranchSection::Saved => format!("{}", value.green().italic()),
@@ -637,8 +647,9 @@ fn group_header_color(group_name: &str) -> crossterm::style::Color {
     match group_name {
         "gone" => crossterm::style::Color::Red,
         "unpushed" => crossterm::style::Color::Yellow,
+        "PR" => crossterm::style::Color::Cyan,
+        "No PR" => crossterm::style::Color::DarkYellow,
         "closed" => crossterm::style::Color::Blue,
-        "no-pr" => crossterm::style::Color::DarkYellow,
         "merged" => crossterm::style::Color::Green,
         _ => crossterm::style::Color::White,
     }
@@ -690,7 +701,7 @@ fn format_delete_command(
 ) -> String {
     let local_command = format!("git branch -D {}", shell_quote(&branch.name));
     let plain = match mode {
-        CleanupMode::Closed => match branch.upstream_branch_name() {
+        mode if mode.uses_pr_metadata() => match branch.upstream_branch_name() {
             Some(remote_branch) => format!(
                 "git push {} :refs/heads/{} && {}",
                 shell_quote(remote),
@@ -739,7 +750,7 @@ fn styled_delete_segments(
     local_command: &str,
 ) -> String {
     match mode {
-        CleanupMode::Closed => match branch.upstream_branch_name() {
+        mode if mode.uses_pr_metadata() => match branch.upstream_branch_name() {
             Some(remote_branch) => format!(
                 "{}{}{}",
                 format!(
@@ -851,19 +862,21 @@ fn left_pad(value: &str, width: usize) -> String {
 }
 
 fn secondary_column_label(mode: CleanupMode) -> &'static str {
-    match mode {
-        CleanupMode::Closed => "pull request",
-        _ => "last commit",
+    if mode.uses_pr_metadata() {
+        "pull request"
+    } else {
+        "last commit"
     }
 }
 
 fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
-    match mode {
-        CleanupMode::Closed => branch
+    if mode.uses_pr_metadata() {
+        branch
             .pr_url
             .clone()
-            .unwrap_or_else(|| String::from("no PR")),
-        _ => format!("\"{}\"", branch.subject),
+            .unwrap_or_else(|| String::from("no PR"))
+    } else {
+        format!("\"{}\"", branch.subject)
     }
 }
 
@@ -875,9 +888,10 @@ fn column_widths(mode: CleanupMode, width: usize) -> (usize, usize, usize) {
         .saturating_sub(min_branch + min_secondary + 4)
         .min(max_age);
     let remaining = width.saturating_sub(age_width + 4);
-    let preferred_branch = match mode {
-        CleanupMode::Closed => remaining / 3,
-        _ => remaining * 2 / 5,
+    let preferred_branch = if mode.uses_pr_metadata() {
+        remaining / 3
+    } else {
+        remaining * 2 / 5
     };
     let branch_width = preferred_branch
         .max(min_branch)
@@ -891,22 +905,23 @@ fn usage_text() -> &'static str {
     r#"git-broom shows grouped local-branch inventory by default, then cleans branches only when you ask it to.
 
 Usage:
-  git-broom [-g <gone,unpushed,closed>] [--remote <name>] [--batch | --dry-run]
-  git-broom clean [-g <gone,unpushed,closed>] [--remote <name>]
+  git-broom [-g <gone,unpushed,pr,nopr,closed,merged>] [--remote <name>] [--batch | --dry-run]
+  git-broom clean [-g <gone,unpushed,nopr,closed,merged>] [--remote <name>]
 
 Cleanup groups:
   gone       Upstream branch no longer exists on the remote.
   unpushed   Local branch has no upstream tracking branch configured.
-  closed     Remote-tracked branch has a closed or missing GitHub PR.
-             This can expand into three review groups:
-             - closed: closed PR
-             - no-pr: no PR found
-             - merged: PR merged but remote branch still exists
+  pr         Remote-tracked branch has an open pull request on GitHub.
+  nopr       Remote-tracked branch has no pull request on GitHub.
+  closed     Remote-tracked branch has a closed pull request on GitHub.
+  merged     Remote-tracked branch has a merged pull request whose branch still exists.
 
 How it works:
   - `git-broom` previews all selected groups without deleting anything.
   - `git-broom clean` enters the step-by-step destructive review flow.
-  - Closed-mode preview reuses cached GitHub PR metadata when it is fresh.
+  - Preview defaults include `pr` so the grouped view covers open-PR branches too.
+  - `pr` is preview-only. `git-broom clean` rejects it.
+  - GitHub-backed groups reuse cached PR metadata when it is fresh.
     `git-broom clean` refreshes GitHub data before any destructive review.
   - `--dry-run` and `--batch` are compatibility aliases for the same default
     grouped preview output.
@@ -915,27 +930,27 @@ How it works:
     Saved branches stay visible but are excluded from delete-all until unsaved.
 
 Options:
-  -g, --groups    Comma-separated groups to show or clean. Default: all.
+  -g, --groups    Comma-separated groups to show or clean. Default: all for each mode.
   --dry-run        Compatibility alias for the default grouped preview.
   --batch          Compatibility alias for the default grouped preview.
-  --remote <name>  Remote to use for closed mode. Default: origin.
+  --remote <name>  Remote to use for GitHub-backed groups. Default: origin.
   -h, --help       Show this help text.
 
 Examples:
   git-broom
-      Preview all implemented cleanup groups.
+      Preview all implemented review groups.
 
-  git-broom --groups gone,unpushed
-      Preview only gone and unpushed groups.
+  git-broom --groups gone,pr
+      Preview only gone and open-PR groups.
 
   git-broom clean
       Review all groups interactively and confirm deletions per group.
 
-  git-broom clean --groups gone,unpushed
-      Only clean gone and unpushed branches.
+  git-broom clean --groups gone,nopr
+      Only clean gone and no-PR branches.
 
-  git-broom --groups closed --remote upstream
-      Preview closed/merged groups using the upstream remote.
+  git-broom --groups pr,closed,merged --remote upstream
+      Preview GitHub-backed groups using the upstream remote.
 "#
 }
 
@@ -1077,7 +1092,10 @@ mod tests {
             vec![
                 CleanupMode::Gone,
                 CleanupMode::Unpushed,
-                CleanupMode::Closed
+                CleanupMode::Pr,
+                CleanupMode::NoPr,
+                CleanupMode::Closed,
+                CleanupMode::Merged,
             ]
         );
         assert_eq!(cli.intent, CliIntent::Preview);
@@ -1126,16 +1144,28 @@ mod tests {
 
     #[test]
     fn parse_groups_value_accepts_comma_separated_groups() {
-        let groups = parse_groups_value("gone, closed,unpushed").expect("groups parse");
+        let groups =
+            parse_groups_value("gone, pr,nopr,closed,merged,unpushed").expect("groups parse");
 
         assert_eq!(
             groups,
             vec![
                 CleanupMode::Gone,
+                CleanupMode::Pr,
+                CleanupMode::NoPr,
                 CleanupMode::Closed,
+                CleanupMode::Merged,
                 CleanupMode::Unpushed
             ]
         );
+    }
+
+    #[test]
+    fn parse_cli_rejects_pr_group_for_clean() {
+        let error = parse_cli(["clean", "--groups", "pr"].into_iter().map(str::to_string))
+            .expect_err("pr rejected for clean");
+
+        assert!(error.to_string().contains("`pr` is a preview-only group"));
     }
 
     #[test]

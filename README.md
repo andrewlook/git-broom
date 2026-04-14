@@ -2,11 +2,14 @@
 
 `git-broom` is a small Rust CLI for cleaning up stale local git branches after squash-merge workflows leave tracking branches behind.
 
-Current behavior focuses on three cleanup groups:
+Current behavior focuses on grouped branch review:
 
 - `gone`: branches whose upstream tracking ref is `[gone]`
 - `unpushed`: local branches with no upstream configured
-- `closed`: remote-tracked branches whose PR is closed or missing on GitHub
+- `pr`: remote-tracked branches with an open PR on GitHub
+- `nopr`: remote-tracked branches with no PR on GitHub
+- `closed`: remote-tracked branches whose PR is closed on GitHub
+- `merged`: remote-tracked branches whose PR is merged but whose remote branch still exists
 - `git-broom` shows a grouped preview by default
 - `git-broom clean` enters the interactive destructive workflow
 - `--batch` and `--dry-run` are compatibility aliases for the same grouped preview
@@ -16,7 +19,7 @@ Current behavior focuses on three cleanup groups:
 
 - `git`
 - Rust toolchain with `rustfmt` and `clippy`
-- `gh` with an authenticated session if you want to use `closed` mode
+- `gh` with an authenticated session if you want to use the GitHub-backed groups (`pr`, `nopr`, `closed`, `merged`)
 
 This repo includes `rust-toolchain.toml` so a standard Rust setup can install the right components automatically.
 If you use `mise`, that is still fine; `mise` can manage the Rust toolchain, but no extra repo-specific `mise` config is required here.
@@ -27,7 +30,7 @@ If you use `mise`, that is still fine; `mise` can manage the Rust toolchain, but
 cargo run
 ```
 
-That previews all implemented cleanup groups without deleting anything.
+That previews all implemented review groups without deleting anything.
 
 To enter the destructive workflow:
 
@@ -42,18 +45,18 @@ Other modes:
 ```bash
 cargo run -- --groups gone
 cargo run -- --groups unpushed
-cargo run -- --groups closed
+cargo run -- --groups pr,nopr,closed,merged
 cargo run -- clean --groups gone,unpushed
-cargo run -- --groups gone,unpushed --dry-run
-cargo run -- --groups closed --remote upstream
+cargo run -- --groups gone,pr --dry-run
+cargo run -- --groups merged --remote upstream
 cargo run -- --groups gone --batch
 ```
 
-`closed` mode can expand into more than one review group, for example separate `closed`, `no-pr`, and `merged` groups.
+`pr` is preview-only. `git-broom clean` rejects it so destructive review only covers cleanup candidates.
 
 Saved branches are cached locally under the repo's git metadata directory, not in tracked files. In a normal clone that path is `.git/git-broom/keep-labels.json`; in worktree setups it resolves through the shared git common dir.
 
-Closed-mode preview also caches GitHub PR metadata locally at `.git/git-broom/pr-cache.json`. That cache speeds up repeated preview runs, but `git-broom clean --groups closed` refreshes GitHub data before destructive review so cleanup does not rely on stale PR metadata.
+GitHub-backed preview also caches PR metadata locally at `.git/git-broom/pr-cache.json`. That cache speeds up repeated preview runs, but `git-broom clean --groups nopr,closed,merged` refreshes GitHub data before destructive review so cleanup does not rely on stale PR metadata.
 
 Within each review group, branches are shown in this order:
 
@@ -63,7 +66,7 @@ Within each review group, branches are shown in this order:
 
 Saved branches stay visible in both the TUI and preview output, but `delete all` skips them until you unsave them.
 
-If `closed` metadata cannot be refreshed and there is no fresh cache, preview mode still shows other selected groups and prints a note that closed metadata is unavailable.
+If GitHub metadata cannot be refreshed and there is no fresh cache, preview mode still shows other selected groups and prints a note that GitHub-backed metadata is unavailable.
 
 ## Install from source
 

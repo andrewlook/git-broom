@@ -12,10 +12,21 @@ use crate::pr_cache::{CachedPullRequestRecord, PrCache, PrCacheRemoteEntry};
 const FIELD_SEPARATOR: char = '\u{1f}';
 const PR_CACHE_TTL_SECONDS: i64 = 10 * 60;
 
-pub const IMPLEMENTED_MODES: [CleanupMode; 3] = [
+pub const DEFAULT_PREVIEW_GROUPS: [CleanupMode; 6] = [
     CleanupMode::Gone,
     CleanupMode::Unpushed,
+    CleanupMode::Pr,
+    CleanupMode::NoPr,
     CleanupMode::Closed,
+    CleanupMode::Merged,
+];
+
+pub const DEFAULT_CLEAN_GROUPS: [CleanupMode; 5] = [
+    CleanupMode::Gone,
+    CleanupMode::Unpushed,
+    CleanupMode::NoPr,
+    CleanupMode::Closed,
+    CleanupMode::Merged,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +70,10 @@ pub struct ScanOutcome {
 pub enum CleanupMode {
     Gone,
     Unpushed,
+    Pr,
+    NoPr,
     Closed,
+    Merged,
 }
 
 impl CleanupMode {
@@ -67,16 +81,33 @@ impl CleanupMode {
         match value {
             "gone" => Some(Self::Gone),
             "unpushed" => Some(Self::Unpushed),
+            "pr" => Some(Self::Pr),
+            "nopr" => Some(Self::NoPr),
             "closed" => Some(Self::Closed),
+            "merged" => Some(Self::Merged),
             _ => None,
         }
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
             Self::Gone => "gone",
             Self::Unpushed => "unpushed",
+            Self::Pr => "pr",
+            Self::NoPr => "nopr",
             Self::Closed => "closed",
+            Self::Merged => "merged",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Gone => "gone",
+            Self::Unpushed => "unpushed",
+            Self::Pr => "PR",
+            Self::NoPr => "No PR",
+            Self::Closed => "closed",
+            Self::Merged => "merged",
         }
     }
 
@@ -84,7 +115,10 @@ impl CleanupMode {
         match self {
             Self::Gone => "upstream branch no longer exists",
             Self::Unpushed => "no upstream tracking branch is configured",
-            Self::Closed => "remote-tracked branch is closed or stale on GitHub",
+            Self::Pr => "open pull request on GitHub",
+            Self::NoPr => "no pull request found on GitHub",
+            Self::Closed => "pull request closed on GitHub",
+            Self::Merged => "pull request merged but remote branch still exists",
         }
     }
 
@@ -92,15 +126,26 @@ impl CleanupMode {
         match self {
             Self::Gone => "No gone branches found.",
             Self::Unpushed => "No unpushed branches found.",
+            Self::Pr => "No open PR branches found.",
+            Self::NoPr => "No branches without PRs found.",
             Self::Closed => "No closed branches found.",
+            Self::Merged => "No merged branches found.",
         }
+    }
+
+    pub fn uses_pr_metadata(self) -> bool {
+        matches!(self, Self::Pr | Self::NoPr | Self::Closed | Self::Merged)
+    }
+
+    pub fn is_cleanable(self) -> bool {
+        !matches!(self, Self::Pr)
     }
 
     fn matches(self, branch: &Branch) -> bool {
         match self {
             Self::Gone => branch.upstream_track.contains("[gone]"),
             Self::Unpushed => branch.upstream.is_none(),
-            Self::Closed => false,
+            Self::Pr | Self::NoPr | Self::Closed | Self::Merged => false,
         }
     }
 }
@@ -228,7 +273,7 @@ impl CleanupGroup {
     pub fn from_mode(mode: CleanupMode, branches: Vec<Branch>) -> Self {
         Self {
             mode,
-            name: mode.name().to_string(),
+            name: mode.display_name().to_string(),
             description: mode.description().to_string(),
             show_empty_message: true,
             branches,
@@ -554,7 +599,7 @@ where
     progress(ScanProgress::ReadingWorktrees, None);
     let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
 
-    if options.intent == ScanIntent::Clean && options.modes.contains(&CleanupMode::Closed) {
+    if options.intent == ScanIntent::Clean && modes_need_pr_metadata(options.modes) {
         progress(ScanProgress::SyncingRemoteRefs, Some(options.remote));
         fetch_prune_remote(repo, options.remote)?;
     }
@@ -565,7 +610,7 @@ where
 
     let closed_candidate_heads = closed_candidate_heads(&all_branches, options.remote);
 
-    let closed_resolution = if options.modes.contains(&CleanupMode::Closed) {
+    let closed_resolution = if modes_need_pr_metadata(options.modes) {
         let resolution = resolve_closed_mode_data(
             repo,
             options.remote,
@@ -582,15 +627,22 @@ where
     };
 
     let mut groups = Vec::new();
+    let mut pr_groups_added = false;
     for mode in options.modes.iter().copied() {
         match mode {
-            CleanupMode::Closed => {
+            mode if mode.uses_pr_metadata() => {
+                if pr_groups_added {
+                    continue;
+                }
+                pr_groups_added = true;
+
                 if let Some(closed_mode_data) = closed_resolution
                     .as_ref()
                     .and_then(|resolution| resolution.data.as_ref())
                 {
                     groups.extend(
-                        build_closed_groups(
+                        build_pr_groups(
+                            options.modes,
                             &all_branches,
                             closed_mode_data,
                             options.remote,
@@ -651,7 +703,7 @@ pub fn delete_branch(
     remote: &str,
     branch: &Branch,
 ) -> DeleteResult {
-    if mode == CleanupMode::Closed {
+    if mode.uses_pr_metadata() && mode.is_cleanable() {
         delete_closed_branch(repo, remote, branch)
     } else {
         delete_local_branch(repo, branch)
@@ -721,6 +773,10 @@ fn closed_candidate_heads(branches: &[Branch], remote: &str) -> Vec<String> {
         .collect()
 }
 
+fn modes_need_pr_metadata(modes: &[CleanupMode]) -> bool {
+    modes.iter().copied().any(CleanupMode::uses_pr_metadata)
+}
+
 fn chunk_summary(heads: &[String]) -> Option<String> {
     if heads.is_empty() {
         return None;
@@ -741,7 +797,8 @@ fn chunk_summary(heads: &[String]) -> Option<String> {
     }
 }
 
-fn build_closed_groups<F>(
+fn build_pr_groups<F>(
+    selected_modes: &[CleanupMode],
     all_branches: &[Branch],
     closed_mode_data: &ClosedModeData,
     remote: &str,
@@ -750,6 +807,7 @@ fn build_closed_groups<F>(
 where
     F: FnMut(ScanProgress, Option<&str>),
 {
+    let mut pr = Vec::new();
     let mut closed = Vec::new();
     let mut no_pr = Vec::new();
     let mut merged = Vec::new();
@@ -782,45 +840,43 @@ where
 
         let mut branch = branch.clone();
         match closed_mode_data.pull_requests.get(head_ref_name) {
-            Some(pr) if pr.state == "OPEN" => continue,
-            Some(pr) if pr.state == "MERGED" => {
-                branch.pr_url = Some(pr.url.clone());
+            Some(record) if record.state == "OPEN" => {
+                branch.pr_url = Some(record.url.clone());
+                pr.push(branch);
+            }
+            Some(record) if record.state == "MERGED" => {
+                branch.pr_url = Some(record.url.clone());
                 merged.push(branch);
             }
-            Some(pr) if pr.state == "CLOSED" => {
-                branch.pr_url = Some(pr.url.clone());
+            Some(record) if record.state == "CLOSED" => {
+                branch.pr_url = Some(record.url.clone());
                 closed.push(branch);
             }
-            Some(pr) => {
-                branch.pr_url = Some(pr.url.clone());
+            Some(record) => {
+                branch.pr_url = Some(record.url.clone());
                 closed.push(branch);
             }
-            None => {
-                no_pr.push(branch);
-            }
+            None => no_pr.push(branch),
         }
     }
 
-    vec![
-        CleanupGroup::named(
-            CleanupMode::Closed,
-            "closed",
-            "pull request closed on GitHub",
-            closed,
-        ),
-        CleanupGroup::named(
-            CleanupMode::Closed,
-            "no-pr",
-            "no pull request found on GitHub",
-            no_pr,
-        ),
-        CleanupGroup::named(
-            CleanupMode::Closed,
-            "merged",
-            "pull request merged but remote branch still exists",
-            merged,
-        ),
-    ]
+    let mut groups = Vec::new();
+    for mode in selected_modes
+        .iter()
+        .copied()
+        .filter(|mode| mode.uses_pr_metadata())
+    {
+        let branches = match mode {
+            CleanupMode::Pr => pr.clone(),
+            CleanupMode::NoPr => no_pr.clone(),
+            CleanupMode::Closed => closed.clone(),
+            CleanupMode::Merged => merged.clone(),
+            CleanupMode::Gone | CleanupMode::Unpushed => continue,
+        };
+        groups.push(CleanupGroup::from_mode(mode, branches));
+    }
+
+    groups
 }
 
 fn apply_keep_labels(
@@ -881,7 +937,7 @@ where
                 refresh_closed_mode_data(repo, remote, candidate_heads, progress)?;
             let mut notes = Vec::new();
             if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
-                notes.push(format!("failed to update closed metadata cache: {error:#}"));
+                notes.push(format!("failed to update GitHub metadata cache: {error:#}"));
             }
             Ok(ClosedModeResolution {
                 data: Some(closed_mode_data),
@@ -904,7 +960,7 @@ where
             match refresh_closed_mode_data(repo, remote, candidate_heads, progress) {
                 Ok(closed_mode_data) => {
                     if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
-                        notes.push(format!("failed to update closed metadata cache: {error:#}"));
+                        notes.push(format!("failed to update GitHub metadata cache: {error:#}"));
                     }
                     Ok(ClosedModeResolution {
                         data: Some(closed_mode_data),
@@ -912,7 +968,7 @@ where
                     })
                 }
                 Err(error) => {
-                    notes.push(format!("closed metadata unavailable: {error:#}"));
+                    notes.push(format!("GitHub metadata unavailable: {error:#}"));
                     Ok(ClosedModeResolution { data: None, notes })
                 }
             }
@@ -932,7 +988,7 @@ fn load_fresh_closed_mode_cache(repo: &Path, remote: &str) -> Result<CacheLoad> 
         Ok(cache) => cache,
         Err(error) => {
             return Ok(CacheLoad::Unavailable(format!(
-                "ignoring unreadable closed metadata cache: {error:#}"
+                "ignoring unreadable GitHub metadata cache: {error:#}"
             )));
         }
     };
@@ -1332,9 +1388,11 @@ fn fetch_prune_remote(repo: &Path, remote: &str) -> Result<()> {
 fn ensure_gh_installed() -> Result<()> {
     match Command::new("gh").args(["--version"]).output() {
         Ok(output) if output.status.success() => Ok(()),
-        Ok(_) => bail!("gh CLI required for closed mode. Install from https://cli.github.com"),
+        Ok(_) => {
+            bail!("gh CLI required for GitHub-backed groups. Install from https://cli.github.com")
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            bail!("gh CLI required for closed mode. Install from https://cli.github.com")
+            bail!("gh CLI required for GitHub-backed groups. Install from https://cli.github.com")
         }
         Err(error) => Err(error).context("failed to run gh --version"),
     }

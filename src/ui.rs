@@ -188,13 +188,18 @@ fn render_branch(
         line_style = line_style.fg(Color::Green);
     }
     let secondary_value = secondary_column_value(branch, app.mode);
-    let secondary_style = match app.mode {
-        CleanupMode::Closed if branch.is_protected() => line_style.fg(Color::DarkGray),
-        CleanupMode::Closed if branch.saved => line_style.fg(Color::Green),
-        CleanupMode::Closed => line_style.fg(Color::Cyan),
-        _ => line_style
+    let secondary_style = if app.mode.uses_pr_metadata() {
+        if branch.is_protected() {
+            line_style.fg(Color::DarkGray)
+        } else if branch.saved {
+            line_style.fg(Color::Green)
+        } else {
+            line_style.fg(Color::Cyan)
+        }
+    } else {
+        line_style
             .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC),
+            .add_modifier(Modifier::ITALIC)
     };
 
     let mut lines = vec![Line::from(vec![
@@ -231,19 +236,21 @@ fn render_branch(
 }
 
 fn secondary_column_label(mode: CleanupMode) -> &'static str {
-    match mode {
-        CleanupMode::Closed => "pull request",
-        _ => "last commit",
+    if mode.uses_pr_metadata() {
+        "pull request"
+    } else {
+        "last commit"
     }
 }
 
 fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
-    match mode {
-        CleanupMode::Closed => branch
+    if mode.uses_pr_metadata() {
+        branch
             .pr_url
             .clone()
-            .unwrap_or_else(|| String::from("no PR")),
-        _ => format!("\"{}\"", branch.subject),
+            .unwrap_or_else(|| String::from("no PR"))
+    } else {
+        format!("\"{}\"", branch.subject)
     }
 }
 
@@ -255,9 +262,10 @@ fn column_widths(mode: CleanupMode, width: usize) -> (usize, usize, usize) {
         .saturating_sub(min_branch + min_secondary + 4)
         .min(max_age);
     let remaining = width.saturating_sub(age_width + 4);
-    let preferred_branch = match mode {
-        CleanupMode::Closed => remaining / 3,
-        _ => remaining * 2 / 5,
+    let preferred_branch = if mode.uses_pr_metadata() {
+        remaining / 3
+    } else {
+        remaining * 2 / 5
     };
     let branch_width = preferred_branch
         .max(min_branch)

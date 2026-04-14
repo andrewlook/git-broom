@@ -4,7 +4,7 @@
 
 - `src/main.rs`: CLI parsing, preview vs clean dispatch, terminal lifecycle
 - `src/app.rs`: branch scanning, cleanup-group construction, protections, delete decisions
-- `src/pr_cache.rs`: repo-local closed-mode PR metadata cache
+- `src/pr_cache.rs`: repo-local GitHub metadata cache for PR-backed groups
 - `src/ui.rs`: ratatui rendering for the interactive review flow
 - `tests/integration.rs`: temp-repo integration coverage
 - `docs/plans/`: active plans
@@ -27,12 +27,13 @@ Current learnings:
 - Treat preview as the default product surface. `git-broom clean` is the only destructive entrypoint.
 - Treat `--dry-run` and `--batch` as compatibility aliases for the default preview, not separate reporting surfaces.
 - Keep destructive flows step-based when there are multiple cleanup groups. Review one group at a time and confirm per group.
-- The CLI hierarchy is `git-broom` vs `git-broom clean`, with `-g/--groups` selecting subsets like `gone,unpushed`.
+- The CLI hierarchy is `git-broom` vs `git-broom clean`, with `-g/--groups` selecting subsets like `gone,unpushed,nopr`.
+- Preview defaults include `pr`; clean defaults exclude it and reject `git-broom clean --groups pr`.
 - Keep protected branches visible in previews and interactive review. Label them inline instead of silently filtering them out.
 - When a protected branch is selected for deletion, explain why it is ineligible instead of ignoring the action.
 - Persistent saved/keep labels live under the git common dir at `git-broom/keep-labels.json`, not in tracked files.
-- Closed-mode preview metadata lives under the git common dir at `git-broom/pr-cache.json`.
-- Preview may use cached GitHub PR metadata when it is fresh; `clean` must refresh closed-mode metadata before destructive review.
+- GitHub-backed preview metadata lives under the git common dir at `git-broom/pr-cache.json`.
+- Preview may use cached GitHub PR metadata when it is fresh; `clean` must refresh GitHub-backed metadata before destructive review.
 - Preserve parity between interactive and non-interactive modes:
   - same group order
   - same mode/explainer text

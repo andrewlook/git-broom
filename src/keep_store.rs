@@ -58,7 +58,7 @@ impl KeepStore {
 
     pub fn is_saved(&self, mode: CleanupMode, branch: &str) -> bool {
         self.labels_by_mode
-            .get(mode.name())
+            .get(mode.key())
             .is_some_and(|branches| branches.contains(branch))
     }
 
@@ -72,9 +72,9 @@ impl KeepStore {
             .map(Into::into)
             .collect::<BTreeSet<_>>();
         if saved.is_empty() {
-            self.labels_by_mode.remove(mode.name());
+            self.labels_by_mode.remove(mode.key());
         } else {
-            self.labels_by_mode.insert(mode.name().to_string(), saved);
+            self.labels_by_mode.insert(mode.key().to_string(), saved);
         }
 
         self.persist()
