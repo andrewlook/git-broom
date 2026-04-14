@@ -47,6 +47,8 @@ Current learnings:
   - `cargo fmt --all`
   - `cargo clippy --all-targets --all-features -- -D warnings`
   - `cargo test`
+- Keep a human-curated `CHANGELOG.md` at the repo root.
+- When shipping user-facing changes, update `CHANGELOG.md` and bump the crate version in both `Cargo.toml` and `Cargo.lock`.
 - When embedding shell scripts in Rust tests or helpers, prefer raw multiline string literals with real line breaks over escaped inline `\n` strings.
 - The repo has a checked-in pre-commit hook at `.githooks/pre-commit`; formatting changes are auto-staged and clippy failures block commits.
 - When a plan is implemented, move it from `docs/plans/` to `docs/archive/`.
