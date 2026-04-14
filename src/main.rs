@@ -3,7 +3,10 @@ use std::io::{self, IsTerminal, Write};
 use std::panic;
 use std::path::Path;
 use std::process;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
@@ -262,38 +265,90 @@ enum ExitAction {
 }
 
 fn run_tui(repo: &Path, app: &mut App) -> Result<ExitAction> {
+    struct ExecutionWorker {
+        index: usize,
+        receiver: Receiver<git_broom::app::DeleteResult>,
+    }
+
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut deleted = 0;
     let mut failed = 0;
+    let mut worker: Option<ExecutionWorker> = None;
 
     loop {
         terminal.draw(|frame| git_broom::ui::render(frame, app))?;
 
         if matches!(app.screen, AppScreen::Executing(_)) && app.execution_failure().is_none() {
-            let Some(index) = app.next_pending_execution_index() else {
-                return Ok(ExitAction::Completed { deleted, failed });
-            };
-            let Some(branch) = app.execution_branch(index).cloned() else {
-                return Ok(ExitAction::Completed { deleted, failed });
-            };
+            if let Some(active) = &worker {
+                match active.receiver.try_recv() {
+                    Ok(result) => {
+                        let index = active.index;
+                        worker = None;
+                        if result.success {
+                            app.mark_execution_result(index, true);
+                            deleted += 1;
+                            continue;
+                        }
 
-            let result = delete_branch(repo, app.mode, &app.remote, &branch);
-            if result.success {
-                app.mark_execution_result(index, true);
-                deleted += 1;
-                continue;
+                        app.mark_execution_result(index, false);
+                        app.mark_execution_skipped_from(index + 1);
+                        app.set_execution_failure(index, result.output);
+                        failed += 1;
+                        continue;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        let index = active.index;
+                        worker = None;
+                        app.mark_execution_result(index, false);
+                        app.mark_execution_skipped_from(index + 1);
+                        app.set_execution_failure(index, "cleanup command worker disconnected");
+                        failed += 1;
+                        continue;
+                    }
+                }
+            } else {
+                let Some(index) = app.next_pending_execution_index() else {
+                    return Ok(ExitAction::Completed { deleted, failed });
+                };
+                let Some(branch) = app.execution_branch(index).cloned() else {
+                    return Ok(ExitAction::Completed { deleted, failed });
+                };
+
+                app.start_execution(index);
+                let repo = repo.to_path_buf();
+                let remote = app.remote.clone();
+                let mode = app.mode;
+                let (sender, receiver) = mpsc::channel();
+                thread::spawn(move || {
+                    let result = delete_branch(&repo, mode, &remote, &branch);
+                    let _ = sender.send(result);
+                });
+                worker = Some(ExecutionWorker { index, receiver });
             }
-
-            app.mark_execution_result(index, false);
-            app.mark_execution_skipped_from(index + 1);
-            app.set_execution_failure(index, result.output);
-            failed += 1;
-            continue;
         }
 
-        if let Event::Key(key) = event::read()? {
+        let next_event =
+            if matches!(app.screen, AppScreen::Executing(_)) && app.execution_failure().is_none() {
+                if event::poll(Duration::from_millis(80))? {
+                    Some(event::read()?)
+                } else {
+                    if app.execution_running_index().is_some() {
+                        app.advance_execution_spinner();
+                    }
+                    None
+                }
+            } else {
+                Some(event::read()?)
+            };
+
+        let Some(Event::Key(key)) = next_event else {
+            continue;
+        };
+
+        {
             if key.kind != KeyEventKind::Press {
                 continue;
             }

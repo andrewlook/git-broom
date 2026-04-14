@@ -333,6 +333,8 @@ pub struct ReviewState {
 pub struct ExecutionState {
     pub items: Vec<CommandPlanItem>,
     pub failure: Option<ExecutionFailure>,
+    pub running_index: Option<usize>,
+    pub spinner_frame: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -557,6 +559,20 @@ impl App {
         }
     }
 
+    pub fn execution_running_index(&self) -> Option<usize> {
+        match &self.screen {
+            AppScreen::Executing(execution) => execution.running_index,
+            _ => None,
+        }
+    }
+
+    pub fn execution_spinner_frame(&self) -> usize {
+        match &self.screen {
+            AppScreen::Executing(execution) => execution.spinner_frame,
+            _ => 0,
+        }
+    }
+
     pub fn enter_review(&mut self) -> bool {
         let items = self
             .delete_candidates()
@@ -593,6 +609,8 @@ impl App {
         self.screen = AppScreen::Executing(ExecutionState {
             items,
             failure: None,
+            running_index: None,
+            spinner_frame: 0,
         });
     }
 
@@ -617,6 +635,7 @@ impl App {
         if let AppScreen::Executing(execution) = &mut self.screen
             && let Some(item) = execution.items.get_mut(index)
         {
+            execution.running_index = None;
             item.state = if success {
                 CommandLineState::Success
             } else {
@@ -639,11 +658,27 @@ impl App {
         if let AppScreen::Executing(execution) = &mut self.screen
             && let Some(item) = execution.items.get(index)
         {
+            execution.running_index = None;
             execution.failure = Some(ExecutionFailure {
                 branch: item.branch.name.clone(),
                 command: item.plain_command(),
                 output: output.into(),
             });
+        }
+    }
+
+    pub fn start_execution(&mut self, index: usize) {
+        if let AppScreen::Executing(execution) = &mut self.screen {
+            execution.running_index = Some(index);
+            execution.spinner_frame = 0;
+        }
+    }
+
+    pub fn advance_execution_spinner(&mut self) {
+        if let AppScreen::Executing(execution) = &mut self.screen
+            && execution.running_index.is_some()
+        {
+            execution.spinner_frame = (execution.spinner_frame + 1) % 4;
         }
     }
 }
@@ -2034,6 +2069,39 @@ mod tests {
         );
         assert_eq!(failure.output, "fatal: remote ref does not exist");
         assert_eq!(app.next_pending_execution_index(), None);
+    }
+
+    #[test]
+    fn execution_spinner_tracks_running_item() {
+        let mut branch = parse_branch_line(
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}origin/feature/foo{FIELD_SEPARATOR}{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        branch.decision = Decision::Delete;
+
+        let mut app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Gone, vec![branch]),
+            "origin",
+            1,
+            1,
+        );
+
+        assert!(app.enter_review());
+        app.begin_execution();
+        app.start_execution(0);
+        app.advance_execution_spinner();
+
+        assert_eq!(app.execution_running_index(), Some(0));
+        assert_eq!(app.execution_spinner_frame(), 1);
+
+        app.mark_execution_result(0, true);
+
+        assert_eq!(app.execution_running_index(), None);
     }
 
     #[test]

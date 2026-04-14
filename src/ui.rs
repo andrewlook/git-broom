@@ -145,7 +145,14 @@ fn render_execution(
     let items = execution
         .items
         .iter()
-        .map(render_execution_command)
+        .enumerate()
+        .map(|(index, item)| {
+            render_execution_command(
+                item,
+                execution.running_index == Some(index),
+                execution.spinner_frame,
+            )
+        })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(items), body_chunks[0]);
 
@@ -200,8 +207,16 @@ fn render_review_command(item: &CommandPlanItem) -> ListItem<'static> {
     ListItem::new(Line::from(spans))
 }
 
-fn render_execution_command(item: &CommandPlanItem) -> ListItem<'static> {
+fn render_execution_command(
+    item: &CommandPlanItem,
+    is_running: bool,
+    spinner_frame: usize,
+) -> ListItem<'static> {
+    let spinner = ["| ", "/ ", "- ", "\\ "];
     let (prefix, command_style) = match item.state {
+        CommandLineState::Pending if is_running => {
+            (spinner[spinner_frame % spinner.len()], Style::default())
+        }
         CommandLineState::Pending => ("  ", Style::default()),
         CommandLineState::Success => (
             "✓ ",
@@ -219,6 +234,9 @@ fn render_execution_command(item: &CommandPlanItem) -> ListItem<'static> {
             .add_modifier(Modifier::BOLD),
         CommandLineState::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         CommandLineState::Skipped => Style::default().fg(Color::DarkGray),
+        CommandLineState::Pending if is_running => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
         CommandLineState::Pending => Style::default(),
     };
 
