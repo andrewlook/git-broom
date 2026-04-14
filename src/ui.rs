@@ -424,8 +424,12 @@ fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
             .clone()
             .unwrap_or_else(|| String::from("no PR"))
     } else {
-        format!("\"{}\"", branch.subject)
+        format!("\"{}\"", truncate_commit_subject(&branch.subject))
     }
+}
+
+fn truncate_commit_subject(subject: &str) -> String {
+    truncate(subject, 50)
 }
 
 fn column_widths(

@@ -585,8 +585,12 @@ fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
             .clone()
             .unwrap_or_else(|| String::from("no PR"))
     } else {
-        format!("\"{}\"", branch.subject)
+        format!("\"{}\"", truncate_commit_subject(&branch.subject))
     }
+}
+
+fn truncate_commit_subject(subject: &str) -> String {
+    fit_for_column(subject, 50)
 }
 
 fn column_widths(mode: CleanupMode, width: usize, branches: &[Branch]) -> (usize, usize) {
@@ -820,7 +824,7 @@ mod tests {
 
     use super::{
         CliIntent, fit_for_column, format_preview_lines, is_immediate_exit, parse_cli,
-        parse_groups_value,
+        parse_groups_value, truncate_commit_subject,
     };
 
     fn sample_branch(name: &str) -> Branch {
@@ -1022,6 +1026,27 @@ mod tests {
                 .contains("closed (pull request closed on github)")
         );
         assert!(lines[2].contains("https://example.test/pr/1"));
+    }
+
+    #[test]
+    fn format_preview_lines_caps_non_pr_commit_subjects() {
+        let mut branch = sample_branch("feature/local-only");
+        branch.subject = String::from(
+            "this is a very long commit subject that should be capped before layout expansion happens",
+        );
+
+        let lines = format_preview_lines(
+            &[CleanupGroup::from_mode(CleanupMode::Unpushed, vec![branch])],
+            200,
+        );
+
+        assert!(lines[2].contains(&format!(
+            "\"{}\"",
+            truncate_commit_subject(
+                "this is a very long commit subject that should be capped before layout expansion happens"
+            )
+        )));
+        assert!(!lines[2].contains("layout expansion happens"));
     }
 
     #[test]
