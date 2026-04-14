@@ -11,6 +11,7 @@ keywords = ["git", "cli", "tui", "branches", "cleanup"]
 categories = ["command-line-utilities"]
 include = [
   "/src/**",
+  "/tests/**",
   "/Cargo.toml",
   "/Cargo.lock",
   "/README.md",
