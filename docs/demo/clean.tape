@@ -20,7 +20,7 @@ Set Theme "Catppuccin Mocha"
 Sleep 500ms
 
 # Start interactive cleanup for gone + merged groups
-Type "git-broom clean -g gone,merged"
+Type "git-broom clean -g unpushed,closed"
 Enter
 
 # Wait for TUI to render (fetches GitHub data)
@@ -52,8 +52,8 @@ Sleep 2s
 
 # -- MERGED group triage --
 # Use "mark all" to select everything at once
-Sleep 500ms
-Type "a"
+Sleep 700ms
+Type "d"
 Sleep 800ms
 
 # Proceed to review

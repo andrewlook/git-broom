@@ -4,11 +4,11 @@ Squash-merge workflows leave stale tracking branches behind. You can nuke whole 
 
 - **`git-broom`** — preview branches grouped by status (safe, read-only)
 
-![preview](https://vhs.charm.sh/vhs-3Z5oO7WVaTYHFdtlpezbHw.gif)
+![preview](https://vhs.charm.sh/vhs-4WsXpdQKoUeEK7SbTLHxxn.gif)
 
 - **`git-broom clean`** — enter the interactive TUI to triage and delete branches
 
-![clean](https://vhs.charm.sh/vhs-2JDuFfJ2oUV4FG36Ki9Idf.gif)
+![clean](https://vhs.charm.sh/vhs-3vyXATmivNqn87DXgSB1vO.gif)
 
 
 ## Branch Groups
