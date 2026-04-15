@@ -1,0 +1,39 @@
+name: Supply Chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly on Monday at 09:00 UTC
+    - cron: "0 9 * * 1"
+
+jobs:
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo-audit
+        run: cargo audit
+
+  vet:
+    name: Dependency Vet
+    runs-on: ubuntu-latest
+    # Only run on PRs and pushes, not on schedule (policy files don't change on their own)
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked
+
+      - name: Run cargo-vet
+        run: cargo vet --locked
