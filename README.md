@@ -1,9 +1,11 @@
 # git-broom
 
-Squash-merge workflows leave stale tracking branches behind, but not every local branch is safe to delete — some have unpushed work, some track PRs you still care about. `git-broom` lists your branches grouped by their remote and PR status so you can see what's worth keeping at a glance, then lets you interactively triage and clean up the rest.
+Squash-merge workflows leave stale tracking branches behind. You can nuke whole categories with one-liners like `git branch --merged | xargs git branch -d`, but that's often too aggressive — some branches have unpushed work, some track PRs you still care about. `git-broom` groups your branches by remote and PR status so you can see what's worth keeping at a glance, then lets you interactively triage and clean up the rest.
 
 - **`git-broom`** — preview branches grouped by status (safe, read-only)
 - **`git-broom clean`** — enter the interactive TUI to triage and delete branches
+
+[![asciicast](https://asciinema.org/a/JTaehSN1oYjpxTPq.svg)](https://asciinema.org/a/JTaehSN1oYjpxTPq)
 
 ## Branch Groups
 
