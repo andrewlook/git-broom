@@ -70,6 +70,8 @@ cargo vet
 
 If `cargo vet` fails after a dependency change, you'll need to either record an audit or add an exemption in `supply-chain/`. See the [cargo-vet book](https://mozilla.github.io/cargo-vet/) for details.
 
+For detailed usage (certifying deps, refreshing imports, CI behavior), see [docs/reference/supply-chain.md](docs/reference/supply-chain.md).
+
 ### Devcontainers
 
 Intentionally deferred. This repo has a lightweight Rust toolchain setup (`rust-toolchain.toml`) with no database or service dependencies, so a devcontainer would add maintenance without solving a current problem. Revisit if the repo gains service dependencies, onboarding friction increases, or Codespaces usage becomes common.
