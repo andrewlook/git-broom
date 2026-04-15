@@ -10,6 +10,7 @@
 - `docs/plans/`: active plans
 - `docs/archive/`: completed or superseded plans
 - `docs/solutions/`: documented learnings and best practices
+- `docs/reference/`: operational reference guides (supply-chain checks, releasing)
 
 ## Knowledge Store
 

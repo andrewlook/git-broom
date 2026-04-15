@@ -55,7 +55,7 @@ Advisory and dependency-audit tools are recommended locally and enforced in CI. 
 Checks `Cargo.lock` against the [RustSec Advisory Database](https://rustsec.org) for known vulnerabilities, yanked crates, and unmaintained dependencies.
 
 ```bash
-cargo install cargo-audit
+cargo install cargo-audit --locked
 cargo audit
 ```
 
@@ -64,7 +64,7 @@ cargo audit
 Tracks whether third-party dependencies have been audited or are covered by trusted upstream audit sets. Run this after adding or updating dependencies:
 
 ```bash
-cargo install cargo-vet
+cargo install cargo-vet --locked
 cargo vet
 ```
 
