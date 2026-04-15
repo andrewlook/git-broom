@@ -5,18 +5,19 @@ Squash-merge workflows leave stale tracking branches behind. You can nuke whole 
 - **`git-broom`** — preview branches grouped by status (safe, read-only)
 - **`git-broom clean`** — enter the interactive TUI to triage and delete branches
 
-[![asciicast](https://asciinema.org/a/JTaehSN1oYjpxTPq.svg)](https://asciinema.org/a/JTaehSN1oYjpxTPq)
+<a href="https://asciinema.org/a/JTaehSN1oYjpxTPq" target="_blank"><img src="https://asciinema.org/a/JTaehSN1oYjpxTPq.svg" /></a>
+
 
 ## Branch Groups
 
-| Group | Has remote? | PR status | Equivalent one-liner |
-|-------|:-----------:|-----------|----------------------|
-| `gone` | ❌ (was tracked, now deleted) | — | `git branch -vv \| grep ': gone]'` |
-| `unpushed` | ❌ (never pushed) | — | `git branch -vv \| grep -v '\[.*/'` |
-| `pr` | ✅ | 🟢 Open | `gh pr list --author @me` |
-| `nopr` | ✅ | ⚪ None | _(no simple one-liner)_ |
-| `closed` | ✅ | 🔴 Closed | `gh pr list --state closed --author @me` |
-| `merged` | ✅ | 🟣 Merged (remote branch still exists) | `gh pr list --state merged --author @me` |
+| Group | Remote | PR | Equivalent one-liner |
+|-------|--------|----|----------------------|
+| 🔴 `gone` | gone | — | `git branch -vv \| grep ': gone]'` |
+| 🟡 `unpushed` | never | — | `git branch -vv \| grep -v '\[.*/'` |
+| 🟠 `nopr` | yes | — | _(no simple one-liner)_ |
+| 🔵 `closed` | yes | closed | `gh pr list --state closed --author @me` |
+| 🟢 `merged` | yes | merged | `gh pr list --state merged --author @me` |
+| 🔵 `pr` | yes | open | `gh pr list --author @me` |
 
 By default, `git-broom` previews all six groups. `git-broom clean` uses all except `pr` (open PRs are preview-only).
 
@@ -58,19 +59,33 @@ git-broom clean
 git-broom clean -g gone,unpushed
 ```
 
-## Interactive TUI
+## Preview mode
 
-`git-broom clean` opens a terminal UI with two screens:
+`git-broom` (without `clean`) prints a grouped branch list and exits — nothing is modified.
+
+![preview](docs/screenshots/list.png)
+
+Saved branches are listed separately at the top of each group so you can see what you've previously decided to keep.
+
+![preview with saved branches](docs/screenshots/list-saved.png)
+
+PR metadata is cached at `.git/git-broom/pr-cache.json` (10-minute TTL) to speed up repeated previews. `git-broom clean` always refreshes GitHub data before entering the TUI.
+
+## Interactive cleanup
+
+`git-broom clean` walks each group through two TUI screens: triage, then review.
 
 ### Triage screen
 
-Browse branches in the current group and decide what to do with each one.
+Browse branches in the current group and mark them for deletion or save them for later.
+
+![triage](docs/screenshots/triage1.png)
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` or `↑` / `↓` | Navigate branches |
 | `d` | Toggle branch for deletion |
-| `s` | Toggle save (persists across sessions — saved branches are skipped by delete-all) |
+| `s` | Toggle save/unsave |
 | `a` | Mark all deletable branches for deletion |
 | `u` | Clear all delete marks |
 | `Enter` | Proceed to review screen |
@@ -80,7 +95,9 @@ Protected branches (`main`, `master`, the current branch, worktree checkouts) ar
 
 ### Review screen
 
-Confirm the branches you marked for deletion.
+Before anything is deleted, the review screen shows the exact git commands that will run. For `gone` and `unpushed` branches, this is just `git branch -D`. For remote-tracked groups (`nopr`, `closed`, `merged`), the remote branch is deleted first (`git push <remote> :refs/heads/<branch>`) followed by the local branch.
+
+![review](docs/screenshots/review-remote.png)
 
 | Key | Action |
 |-----|--------|
@@ -88,14 +105,16 @@ Confirm the branches you marked for deletion.
 | `n` | Go back to triage |
 | `q` / `Esc` | Quit |
 
-## How It Works
+## Saved branches
 
-- **Preview mode** shows a grouped branch list and exits — nothing is modified.
-- **Clean mode** walks each group through the TUI, then deletes confirmed branches:
-  - For `gone` and `unpushed`: runs `git branch -D <branch>`
-  - For `nopr`, `closed`, `merged`: deletes the remote branch (`git push <remote> :refs/heads/<branch>`) then the local branch
-- **Saved branches** are stored per-repo under `.git/git-broom/keep-labels.json`. They stay visible in preview and TUI output but are excluded from delete-all until you unsave them.
-- **PR metadata** is cached at `.git/git-broom/pr-cache.json` to speed up repeated previews. `git-broom clean` always refreshes GitHub data before destructive review.
+Press `s` in the triage screen to save a branch. Saved branches are:
+
+- Persisted per-repo at `.git/git-broom/keep-labels.json` (survives across sessions)
+- Scoped to the cleanup group — saving a branch in `nopr` doesn't affect other groups
+- Visible in both preview and TUI output, listed at the top of their group
+- Excluded from `a` (mark all) and delete-all until you explicitly unsave them
+
+In worktree setups, saved branches resolve through the shared git common dir so all worktrees share the same saved state.
 
 ## Contributing
 
