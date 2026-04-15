@@ -1,7 +1,7 @@
 ---
 title: refactor: Add Rust supply-chain checks
 type: refactor
-status: active
+status: completed
 date: 2026-04-12
 deepened: 2026-04-12
 ---
@@ -141,7 +141,7 @@ Recommended rollout shape:
 
 ## Implementation Units
 
-- [ ] **Unit 1: Document the local supply-chain workflow**
+- [x] **Unit 1: Document the local supply-chain workflow**
 
 **Goal:** Add clear contributor guidance for running dependency security checks locally without expanding the pre-commit hook.
 
@@ -172,7 +172,7 @@ Recommended rollout shape:
 **Verification:**
 - A contributor can read `README.md` and understand which commands are optional local checks, which checks CI enforces, and why supply-chain tools are not part of pre-commit.
 
-- [ ] **Unit 2: Add automated dependency advisory coverage**
+- [x] **Unit 2: Add automated dependency advisory coverage**
 
 **Goal:** Add GitHub automation that catches known dependency advisories promptly and keeps update automation aligned with Cargo usage in the repo.
 
@@ -207,7 +207,7 @@ Recommended rollout shape:
 **Verification:**
 - The repo has automated advisory detection on pull requests and on a weekly default-branch schedule, and Dependabot is configured for the package ecosystems the repo actually uses.
 
-- [ ] **Unit 3: Bootstrap `cargo-vet` as a committed policy**
+- [x] **Unit 3: Bootstrap `cargo-vet` as a committed policy**
 
 **Goal:** Introduce a reviewable `cargo-vet` policy that records trusted imports, exemptions, and future audits in version control.
 
