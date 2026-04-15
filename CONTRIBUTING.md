@@ -46,6 +46,34 @@ What it does:
 - runs `cargo clippy --all-targets --all-features -- -D warnings`
 - fails the commit if linting fails
 
+## Supply-chain checks
+
+Advisory and dependency-audit tools are recommended locally and enforced in CI. They are **not** part of the pre-commit hook — advisory databases change independently of the code being committed, so keeping the hook fast and deterministic is more important.
+
+### cargo-audit
+
+Checks `Cargo.lock` against the [RustSec Advisory Database](https://rustsec.org) for known vulnerabilities, yanked crates, and unmaintained dependencies.
+
+```bash
+cargo install cargo-audit
+cargo audit
+```
+
+### cargo-vet
+
+Tracks whether third-party dependencies have been audited or are covered by trusted upstream audit sets. Run this after adding or updating dependencies:
+
+```bash
+cargo install cargo-vet
+cargo vet
+```
+
+If `cargo vet` fails after a dependency change, you'll need to either record an audit or add an exemption in `supply-chain/`. See the [cargo-vet book](https://mozilla.github.io/cargo-vet/) for details.
+
+### Devcontainers
+
+Intentionally deferred. This repo has a lightweight Rust toolchain setup (`rust-toolchain.toml`) with no database or service dependencies, so a devcontainer would add maintenance without solving a current problem. Revisit if the repo gains service dependencies, onboarding friction increases, or Codespaces usage becomes common.
+
 ## CI
 
 GitHub Actions runs:
@@ -53,8 +81,10 @@ GitHub Actions runs:
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
+- `cargo audit` (on PRs, pushes to main, and weekly schedule)
+- `cargo vet --locked` (on PRs and pushes to main)
 
-Tests run on both Linux and macOS.
+Tests run on both Linux and macOS. Supply-chain checks run in a separate workflow.
 
 ## Bumping The Version
 
