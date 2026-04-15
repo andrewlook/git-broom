@@ -1,148 +1,103 @@
 # git-broom
 
-`git-broom` is a small Rust CLI for cleaning up stale local git branches after squash-merge workflows leave tracking branches behind.
+Squash-merge workflows leave stale tracking branches behind, but not every local branch is safe to delete — some have unpushed work, some track PRs you still care about. `git-broom` lists your branches grouped by their remote and PR status so you can see what's worth keeping at a glance, then lets you interactively triage and clean up the rest.
 
-It is designed to be safe to browse often and destructive only on purpose:
+- **`git-broom`** — preview branches grouped by status (safe, read-only)
+- **`git-broom clean`** — enter the interactive TUI to triage and delete branches
 
-- `git-broom` shows a grouped preview by default
-- `git-broom clean` enters the interactive destructive workflow
-- `--batch` and `--dry-run` are compatibility aliases for the same grouped preview
+## Branch Groups
 
-Current behavior focuses on grouped branch review:
+| Group | Has remote? | PR status | Equivalent one-liner |
+|-------|:-----------:|-----------|----------------------|
+| `gone` | ❌ (was tracked, now deleted) | — | `git branch -vv \| grep ': gone]'` |
+| `unpushed` | ❌ (never pushed) | — | `git branch -vv \| grep -v '\[.*/'` |
+| `pr` | ✅ | 🟢 Open | `gh pr list --author @me` |
+| `nopr` | ✅ | ⚪ None | _(no simple one-liner)_ |
+| `closed` | ✅ | 🔴 Closed | `gh pr list --state closed --author @me` |
+| `merged` | ✅ | 🟣 Merged (remote branch still exists) | `gh pr list --state merged --author @me` |
 
-- `gone`: branches whose upstream tracking ref is `[gone]`
-- `unpushed`: local branches with no upstream configured
-- `pr`: remote-tracked branches with an open PR on GitHub
-- `nopr`: remote-tracked branches with no PR on GitHub
-- `closed`: remote-tracked branches whose PR is closed on GitHub
-- `merged`: remote-tracked branches whose PR is merged but whose remote branch still exists
-- `s` in interactive mode saves or unsaves a branch for this repo and cleanup mode
-
-## Requirements
-
-- `git`
-- Rust toolchain with `rustfmt` and `clippy`
-- `gh` with an authenticated session if you want to use the GitHub-backed groups (`pr`, `nopr`, `closed`, `merged`)
-
-This repo includes `rust-toolchain.toml` so a standard Rust setup can install the right components automatically.
-If you use `mise`, that is still fine; `mise` can manage the Rust toolchain, but no extra repo-specific `mise` config is required here.
-
-## Running locally
-
-```bash
-cargo run
-```
-
-That previews all implemented review groups without deleting anything.
-
-To enter the destructive workflow:
-
-```bash
-cargo run -- clean
-```
-
-That walks the selected groups one by one, lets you save or mark branches for deletion, and asks for confirmation before running cleanup commands for each group.
-
-Other modes:
-
-```bash
-cargo run -- --groups gone
-cargo run -- --groups unpushed
-cargo run -- --groups pr,nopr,closed,merged
-cargo run -- clean --groups gone,unpushed
-cargo run -- --groups gone,pr --dry-run
-cargo run -- --groups merged --remote upstream
-cargo run -- --groups gone --batch
-```
-
-`pr` is preview-only. `git-broom clean` rejects it so destructive review only covers cleanup candidates.
-
-Saved branches are cached locally under the repo's git metadata directory, not in tracked files. In a normal clone that path is `.git/git-broom/keep-labels.json`; in worktree setups it resolves through the shared git common dir.
-
-GitHub-backed preview also caches PR metadata locally at `.git/git-broom/pr-cache.json`. That cache speeds up repeated preview runs, but `git-broom clean --groups nopr,closed,merged` refreshes GitHub data before destructive review so cleanup does not rely on stale PR metadata.
-
-Within each review group, branches are shown in this order:
-
-- protected branches first
-- saved branches next
-- regular cleanup candidates last
-
-Saved branches stay visible in both the TUI and preview output, but `delete all` skips them until you unsave them.
-
-If GitHub metadata cannot be refreshed and there is no fresh cache, preview mode still shows other selected groups and prints a note that GitHub-backed metadata is unavailable.
+By default, `git-broom` previews all six groups. `git-broom clean` uses all except `pr` (open PRs are preview-only).
 
 ## Install
 
-Once the crate is published, install it from crates.io with:
+You need [Rust](https://rustup.rs) and the [GitHub CLI](https://cli.github.com) (`gh`):
 
 ```bash
+# authenticate with GitHub (needed for pr/nopr/closed/merged groups)
+gh auth login
+
+# install from crates.io
 cargo install git-broom
 ```
 
-If you want the latest local source checkout instead:
+## Usage
 
-Clone the repo, then install the binary with Cargo:
-
-```bash
-cargo install --path .
-```
-
-That places `git-broom` in Cargo's bin directory, typically `~/.cargo/bin`.
-
-If you prefer to build it without installing globally:
+### Preview branches
 
 ```bash
-cargo build --release
-./target/release/git-broom
+# preview all groups
+git-broom
+
+# preview only specific groups
+git-broom -g gone,unpushed
+git-broom -g pr,closed,merged
+
+# use a different remote (default: origin)
+git-broom -g merged --remote upstream
 ```
 
-## Running the tests
-
-Core local checks:
+### Clean up branches
 
 ```bash
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+# interactively triage all cleanup groups
+git-broom clean
+
+# only triage specific groups
+git-broom clean -g gone,unpushed
 ```
 
-## Pre-commit hook
+## Interactive TUI
 
-This repo includes a checked-in pre-commit hook at `.githooks/pre-commit`.
+`git-broom clean` opens a terminal UI with two screens:
 
-Enable it once per clone:
+### Triage screen
 
-```bash
-git config core.hooksPath .githooks
-```
+Browse branches in the current group and decide what to do with each one.
 
-What it does:
+| Key | Action |
+|-----|--------|
+| `j` / `k` or `↑` / `↓` | Navigate branches |
+| `d` | Toggle branch for deletion |
+| `s` | Toggle save (persists across sessions — saved branches are skipped by delete-all) |
+| `a` | Mark all deletable branches for deletion |
+| `u` | Clear all delete marks |
+| `Enter` | Proceed to review screen |
+| `q` / `Esc` | Quit |
 
-- runs `rustfmt` on staged Rust files
-- automatically stages any formatting changes made by the hook
-- runs `cargo clippy --all-targets --all-features -- -D warnings`
-- fails the commit if linting fails
+Protected branches (`main`, `master`, the current branch, worktree checkouts) are shown for context but cannot be deleted.
 
-If you want to verify the same steps manually, run the commands in the previous section.
+### Review screen
 
-## CI
+Confirm the branches you marked for deletion.
 
-GitHub Actions runs:
+| Key | Action |
+|-----|--------|
+| `y` | Confirm and delete |
+| `n` | Go back to triage |
+| `q` / `Esc` | Quit |
 
-- `cargo fmt --all --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
+## How It Works
 
-Tests run on both Linux and macOS.
+- **Preview mode** shows a grouped branch list and exits — nothing is modified.
+- **Clean mode** walks each group through the TUI, then deletes confirmed branches:
+  - For `gone` and `unpushed`: runs `git branch -D <branch>`
+  - For `nopr`, `closed`, `merged`: deletes the remote branch (`git push <remote> :refs/heads/<branch>`) then the local branch
+- **Saved branches** are stored per-repo under `.git/git-broom/keep-labels.json`. They stay visible in preview and TUI output but are excluded from delete-all until you unsave them.
+- **PR metadata** is cached at `.git/git-broom/pr-cache.json` to speed up repeated previews. `git-broom clean` always refreshes GitHub data before destructive review.
 
-## Releasing
+## Contributing
 
-This repo supports two release paths:
-
-- first publish locally with `cargo publish --dry-run --locked` followed by `cargo publish --locked`
-- later tag-based releases through GitHub Actions by pushing a tag like `v0.1.1`
-
-The detailed maintainer workflow is documented in [docs/releasing.md](docs/releasing.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and release instructions.
 
 ## License
 

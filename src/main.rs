@@ -92,11 +92,8 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
     } else {
         CliIntent::Preview
     };
-    let mut saw_preview_alias = false;
-
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--batch" | "--dry-run" => saw_preview_alias = true,
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
@@ -135,13 +132,6 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
             CliIntent::Preview => DEFAULT_PREVIEW_GROUPS.to_vec(),
             CliIntent::Clean => DEFAULT_CLEAN_GROUPS.to_vec(),
         };
-    }
-
-    if intent == CliIntent::Clean && saw_preview_alias {
-        bail!(
-            "`git-broom clean` is destructive. Remove `--dry-run` / `--batch`, or run `git-broom` without `clean` to preview groups.\n\n{}",
-            usage_text()
-        );
     }
 
     if intent == CliIntent::Clean && modes.iter().any(|mode| !mode.is_cleanable()) {
@@ -724,7 +714,7 @@ fn usage_text() -> &'static str {
     r#"git-broom shows grouped local-branch inventory by default, then cleans branches only when you ask it to.
 
 Usage:
-  git-broom [-g <gone,unpushed,pr,nopr,closed,merged>] [--remote <name>] [--batch | --dry-run]
+  git-broom [-g <gone,unpushed,pr,nopr,closed,merged>] [--remote <name>]
   git-broom clean [-g <gone,unpushed,nopr,closed,merged>] [--remote <name>]
 
 Cleanup groups:
@@ -742,16 +732,12 @@ How it works:
   - `pr` is preview-only. `git-broom clean` rejects it.
   - GitHub-backed groups reuse cached PR metadata when it is fresh.
     `git-broom clean` refreshes GitHub data before any destructive review.
-  - `--dry-run` and `--batch` are compatibility aliases for the same default
-    grouped preview output.
   - Protected branches stay visible for context but cannot be deleted.
   - Press s in the TUI to save or unsave a branch for this repo and mode.
     Saved branches stay visible but are excluded from delete-all until unsaved.
 
 Options:
   -g, --groups    Comma-separated groups to show or clean. Default: all for each mode.
-  --dry-run        Compatibility alias for the default grouped preview.
-  --batch          Compatibility alias for the default grouped preview.
   --remote <name>  Remote to use for GitHub-backed groups. Default: origin.
   -h, --help       Show this help text.
 
@@ -922,20 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_accepts_multiple_modes_for_preview_alias() {
-        let cli = parse_cli(
-            ["--groups", "gone,unpushed", "--dry-run"]
-                .into_iter()
-                .map(str::to_string),
-        )
-        .expect("cli parses");
-
-        assert_eq!(cli.modes, vec![CleanupMode::Gone, CleanupMode::Unpushed]);
-        assert_eq!(cli.intent, CliIntent::Preview);
-        assert_eq!(cli.remote, "origin");
-    }
-
-    #[test]
     fn parse_cli_accepts_remote_for_clean_closed_mode() {
         let cli = parse_cli(
             ["clean", "--groups", "closed", "--remote", "upstream"]
@@ -950,15 +922,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_rejects_clean_with_preview_alias() {
-        let error = parse_cli(["clean", "--dry-run"].into_iter().map(str::to_string))
-            .expect_err("clean preview alias rejected");
+    fn parse_cli_rejects_unknown_flag() {
+        let error = parse_cli(["--dry-run"].into_iter().map(str::to_string))
+            .expect_err("unknown flag rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("`git-broom clean` is destructive")
-        );
+        assert!(error.to_string().contains("unknown argument"));
     }
 
     #[test]

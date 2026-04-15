@@ -1,20 +1,60 @@
 # Contributing
 
-## Local Verification
+## Requirements
 
-Run the normal Rust checks before opening or updating a PR:
+- Rust toolchain with `rustfmt` and `clippy`
+- `gh` with an authenticated session (for GitHub-backed groups)
+
+This repo includes `rust-toolchain.toml` so a standard Rust setup installs the right components automatically.
+
+## Running locally
 
 ```bash
-cargo fmt --all
+# preview mode (no deletions)
+cargo run
+
+# destructive workflow
+cargo run -- clean
+
+# filter groups
+cargo run -- -g gone,unpushed
+cargo run -- clean -g gone,nopr
+```
+
+## Running the tests
+
+```bash
+cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-The repo also ships a checked-in pre-commit hook in `.githooks/pre-commit`. If this clone is not already configured to use it, run:
+## Pre-commit hook
+
+This repo includes a checked-in pre-commit hook at `.githooks/pre-commit`.
+
+Enable it once per clone:
 
 ```bash
 git config core.hooksPath .githooks
 ```
+
+What it does:
+
+- runs `rustfmt` on staged Rust files
+- automatically stages any formatting changes made by the hook
+- runs `cargo clippy --all-targets --all-features -- -D warnings`
+- fails the commit if linting fails
+
+## CI
+
+GitHub Actions runs:
+
+- `cargo fmt --all --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Tests run on both Linux and macOS.
 
 ## Bumping The Version
 

@@ -130,7 +130,7 @@ fn scan_keeps_gone_and_unpushed_groups_separate() {
 }
 
 #[test]
-fn dry_run_groups_closed_mode_by_reason() {
+fn preview_groups_closed_mode_by_reason() {
     let repo = TestRepo::new();
     repo.create_remote_tracked_branch("feature/closed", "origin");
     repo.create_remote_tracked_branch("feature/merged", "origin");
@@ -164,7 +164,7 @@ fn dry_run_groups_closed_mode_by_reason() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["--groups", "pr,nopr,closed,merged", "--dry-run"])
+        .args(["--groups", "pr,nopr,closed,merged"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
@@ -490,7 +490,7 @@ fn closed_mode_excludes_open_prs_found_via_head_search() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["--groups", "nopr", "--dry-run"])
+        .args(["--groups", "nopr"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
@@ -527,7 +527,7 @@ fn closed_mode_excludes_merged_branches_whose_remote_is_already_gone() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
-        .args(["--groups", "merged", "--dry-run"])
+        .args(["--groups", "merged"])
         .current_dir(repo.local_path())
         .env("PATH", path_with_prefix(&fake_gh_dir))
         .output()
