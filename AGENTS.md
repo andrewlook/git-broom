@@ -20,6 +20,7 @@ Relevant when implementing or debugging in an area that already has a documented
 Current learnings:
 
 - `docs/solutions/best-practices/mirror-interactive-cleanup-previews-2026-04-12.md`
+- `docs/solutions/workflow-issues/cargo-dist-release-workflow-on-prs-2026-04-15.md`
 
 ## Product Preferences
 
