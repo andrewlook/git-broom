@@ -54,3 +54,4 @@ Current learnings:
 - When embedding shell scripts in Rust tests or helpers, prefer raw multiline string literals with real line breaks over escaped inline `\n` strings.
 - The repo has a checked-in pre-commit hook at `.githooks/pre-commit`; formatting changes are auto-staged and clippy failures block commits.
 - When a plan is implemented, move it from `docs/plans/` to `docs/archive/`.
+- Preferred merge strategy: rebase main to the feature branch tip (`git checkout main && git rebase <branch>`), not merge commits.
