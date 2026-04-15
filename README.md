@@ -26,13 +26,23 @@ By default, `git-broom` previews all six groups. `git-broom clean` uses all exce
 
 ## Install
 
-You need [Rust](https://rustup.rs) and the [GitHub CLI](https://cli.github.com) (`gh`):
+You need the [GitHub CLI](https://cli.github.com) (`gh`):
 
 ```bash
-# authenticate with GitHub (needed for pr/nopr/closed/merged groups)
 gh auth login
+```
 
-# install from crates.io
+### Homebrew
+
+```bash
+brew install andrewlook/tap/git-broom
+```
+
+### Cargo
+
+If you have [Rust](https://rustup.rs) installed:
+
+```bash
 cargo install git-broom
 ```
 
