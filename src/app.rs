@@ -40,6 +40,7 @@ pub struct ScanOptions<'a> {
     pub modes: &'a [CleanupMode],
     pub remote: &'a str,
     pub intent: ScanIntent,
+    pub refresh: bool,
 }
 
 impl<'a> ScanOptions<'a> {
@@ -48,6 +49,7 @@ impl<'a> ScanOptions<'a> {
             modes,
             remote,
             intent: ScanIntent::Preview,
+            refresh: false,
         }
     }
 
@@ -56,7 +58,13 @@ impl<'a> ScanOptions<'a> {
             modes,
             remote,
             intent: ScanIntent::Clean,
+            refresh: false,
         }
+    }
+
+    pub fn with_refresh(mut self, refresh: bool) -> Self {
+        self.refresh = refresh;
+        self
     }
 }
 
@@ -864,7 +872,8 @@ where
     progress(ScanProgress::ReadingWorktrees, None);
     let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
 
-    if options.intent == ScanIntent::Clean && modes_need_pr_metadata(options.modes) {
+    let force_refresh = options.refresh || options.intent == ScanIntent::Clean;
+    if force_refresh && modes_need_pr_metadata(options.modes) {
         progress(ScanProgress::SyncingRemoteRefs, Some(options.remote));
         fetch_prune_remote(repo, options.remote)?;
     }
@@ -880,7 +889,7 @@ where
             repo,
             options.remote,
             &closed_candidate_heads,
-            options.intent,
+            force_refresh,
             &mut progress,
         )?;
         if let Some(closed_mode_data) = &resolution.data {
@@ -1190,52 +1199,48 @@ fn resolve_closed_mode_data<F>(
     repo: &Path,
     remote: &str,
     candidate_heads: &[String],
-    intent: ScanIntent,
+    force_refresh: bool,
     progress: &mut F,
 ) -> Result<ClosedModeResolution>
 where
     F: FnMut(ScanProgress, Option<&str>),
 {
-    match intent {
-        ScanIntent::Clean => {
-            let closed_mode_data =
-                refresh_closed_mode_data(repo, remote, candidate_heads, progress)?;
-            let mut notes = Vec::new();
-            if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
-                notes.push(format!("failed to update GitHub metadata cache: {error:#}"));
-            }
-            Ok(ClosedModeResolution {
-                data: Some(closed_mode_data),
-                notes,
-            })
+    if force_refresh {
+        let closed_mode_data = refresh_closed_mode_data(repo, remote, candidate_heads, progress)?;
+        let mut notes = Vec::new();
+        if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
+            notes.push(format!("failed to update GitHub metadata cache: {error:#}"));
         }
-        ScanIntent::Preview => {
-            let mut notes = Vec::new();
-            match load_fresh_closed_mode_cache(repo, remote)? {
-                CacheLoad::Fresh(closed_mode_data) => {
-                    return Ok(ClosedModeResolution {
-                        data: Some(closed_mode_data),
-                        notes,
-                    });
-                }
-                CacheLoad::Unavailable(note) => notes.push(note),
-                CacheLoad::Missing => {}
+        Ok(ClosedModeResolution {
+            data: Some(closed_mode_data),
+            notes,
+        })
+    } else {
+        let mut notes = Vec::new();
+        match load_fresh_closed_mode_cache(repo, remote)? {
+            CacheLoad::Fresh(closed_mode_data) => {
+                return Ok(ClosedModeResolution {
+                    data: Some(closed_mode_data),
+                    notes,
+                });
             }
+            CacheLoad::Unavailable(note) => notes.push(note),
+            CacheLoad::Missing => {}
+        }
 
-            match refresh_closed_mode_data(repo, remote, candidate_heads, progress) {
-                Ok(closed_mode_data) => {
-                    if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
-                        notes.push(format!("failed to update GitHub metadata cache: {error:#}"));
-                    }
-                    Ok(ClosedModeResolution {
-                        data: Some(closed_mode_data),
-                        notes,
-                    })
+        match refresh_closed_mode_data(repo, remote, candidate_heads, progress) {
+            Ok(closed_mode_data) => {
+                if let Err(error) = persist_closed_mode_cache(repo, remote, &closed_mode_data) {
+                    notes.push(format!("failed to update GitHub metadata cache: {error:#}"));
                 }
-                Err(error) => {
-                    notes.push(format!("GitHub metadata unavailable: {error:#}"));
-                    Ok(ClosedModeResolution { data: None, notes })
-                }
+                Ok(ClosedModeResolution {
+                    data: Some(closed_mode_data),
+                    notes,
+                })
+            }
+            Err(error) => {
+                notes.push(format!("GitHub metadata unavailable: {error:#}"));
+                Ok(ClosedModeResolution { data: None, notes })
             }
         }
     }

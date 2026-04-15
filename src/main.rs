@@ -38,7 +38,7 @@ fn run() -> Result<()> {
     let outcome = match cli.intent {
         CliIntent::Preview => scan_with_options(
             &repo,
-            ScanOptions::preview(&cli.modes, &cli.remote),
+            ScanOptions::preview(&cli.modes, &cli.remote).with_refresh(cli.refresh),
             |_, _| {},
         )?,
         CliIntent::Clean if cli.modes.iter().copied().any(CleanupMode::uses_pr_metadata) => {
@@ -80,11 +80,13 @@ struct CliOptions {
     modes: Vec<CleanupMode>,
     intent: CliIntent,
     remote: String,
+    refresh: bool,
 }
 
 fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
     let mut modes = Vec::new();
     let mut remote = String::from("origin");
+    let mut refresh = false;
     let mut args = args.peekable();
     let intent = if matches!(args.peek().map(String::as_str), Some("clean")) {
         args.next();
@@ -94,6 +96,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "-r" | "--refresh" => refresh = true,
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
@@ -145,6 +148,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<CliOptions> {
         modes,
         intent,
         remote,
+        refresh,
     })
 }
 
@@ -714,7 +718,7 @@ fn usage_text() -> &'static str {
     r#"git-broom shows grouped local-branch inventory by default, then cleans branches only when you ask it to.
 
 Usage:
-  git-broom [-g <gone,unpushed,pr,nopr,closed,merged>] [--remote <name>]
+  git-broom [-g <gone,unpushed,pr,nopr,closed,merged>] [--remote <name>] [-r]
   git-broom clean [-g <gone,unpushed,nopr,closed,merged>] [--remote <name>]
 
 Cleanup groups:
@@ -737,7 +741,8 @@ How it works:
     Saved branches stay visible but are excluded from delete-all until unsaved.
 
 Options:
-  -g, --groups    Comma-separated groups to show or clean. Default: all for each mode.
+  -g, --groups     Comma-separated groups to show or clean. Default: all for each mode.
+  -r, --refresh    Bypass the PR metadata cache and fetch fresh data from GitHub.
   --remote <name>  Remote to use for GitHub-backed groups. Default: origin.
   -h, --help       Show this help text.
 
@@ -905,6 +910,27 @@ mod tests {
         );
         assert_eq!(cli.intent, CliIntent::Preview);
         assert_eq!(cli.remote, "origin");
+        assert!(!cli.refresh);
+    }
+
+    #[test]
+    fn parse_cli_accepts_refresh_flag() {
+        let cli = parse_cli(
+            ["-r", "--groups", "pr,closed"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("cli parses");
+
+        assert!(cli.refresh);
+        assert_eq!(cli.intent, CliIntent::Preview);
+    }
+
+    #[test]
+    fn parse_cli_accepts_long_refresh_flag() {
+        let cli = parse_cli(["--refresh"].into_iter().map(str::to_string)).expect("cli parses");
+
+        assert!(cli.refresh);
     }
 
     #[test]
