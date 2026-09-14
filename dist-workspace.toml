@@ -21,3 +21,5 @@ install-updater = false
 tap = "andrewlook/homebrew-tap"
 # Publish to the tap on release
 publish-jobs = ["homebrew"]
+# The checked-in workflow intentionally differs from cargo-dist's generated output.
+allow-dirty = ["ci"]
