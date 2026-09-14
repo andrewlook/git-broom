@@ -1,17 +1,17 @@
 # git-broom
 
-Squash-merge workflows leave stale tracking branches behind. You can nuke whole categories with one-liners like `git branch --merged | xargs git branch -d`, but that's often too aggressive — some branches have unpushed work, some track PRs you still care about. `git-broom` groups your branches by remote and PR status so you can see what's worth keeping at a glance, then lets you interactively triage and clean up the rest.
+Squash-merge workflows leave stale tracking branches and linked worktrees behind. You can nuke whole categories with one-liners like `git branch --merged | xargs git branch -d`, but that's often too aggressive — some branches have unpushed work, some track PRs you still care about. `git-broom` groups your branches by remote and PR status and lists linked worktrees so you can see what's worth keeping at a glance, then lets you interactively triage and clean up the rest.
 
-- **`git-broom`** — preview branches grouped by status (safe, read-only)
+- **`git-broom`** — preview branches and linked worktrees grouped by status (safe, read-only)
 
 ![preview](https://vhs.charm.sh/vhs-4WsXpdQKoUeEK7SbTLHxxn.gif)
 
-- **`git-broom clean`** — enter the interactive TUI to triage and delete branches
+- **`git-broom clean`** — enter the interactive TUI to triage and clean up items
 
 ![clean](https://vhs.charm.sh/vhs-3vyXATmivNqn87DXgSB1vO.gif)
 
 
-## Branch Groups
+## Cleanup Groups
 
 | Group | Remote | PR | Equivalent one-liner |
 |-------|--------|----|----------------------|
@@ -21,8 +21,9 @@ Squash-merge workflows leave stale tracking branches behind. You can nuke whole 
 | 🔵 `closed` | yes | closed | `gh pr list --state closed --author @me` |
 | 🟢 `merged` | yes | merged | `gh pr list --state merged --author @me` |
 | 🔵 `pr` | yes | open | `gh pr list --author @me` |
+| 🟣 `worktree` | — | — | `git worktree list` |
 
-By default, `git-broom` previews all six groups. `git-broom clean` uses all except `pr` (open PRs are preview-only).
+By default, `git-broom` previews all seven groups. `git-broom clean` uses all except `pr` (open PRs are preview-only).
 
 ## Install
 
@@ -48,7 +49,7 @@ cargo install git-broom
 
 ## Usage
 
-### Preview branches
+### Preview items
 
 ```bash
 # preview all groups
@@ -57,12 +58,13 @@ git-broom
 # preview only specific groups
 git-broom -g gone,unpushed
 git-broom -g pr,closed,merged
+git-broom -g worktree
 
 # use a different remote (default: origin)
 git-broom -g merged --remote upstream
 ```
 
-### Clean up branches
+### Clean up items
 
 ```bash
 # interactively triage all cleanup groups
@@ -70,11 +72,12 @@ git-broom clean
 
 # only triage specific groups
 git-broom clean -g gone,unpushed
+git-broom clean -g worktree
 ```
 
 ## Preview mode
 
-`git-broom` (without `clean`) prints a grouped branch list and exits — nothing is modified.
+`git-broom` (without `clean`) prints a grouped inventory and exits — nothing is modified.
 
 ![preview](docs/screenshots/list.png)
 
@@ -92,17 +95,17 @@ Saved branches are listed separately at the top of each group so you can see wha
 1. First, **triage**
 2. Then **review**.
 
-**Triage:** Browse branches in the current group and mark them for deletion or save them for later.
+**Triage:** Browse items in the current group and mark them for cleanup or save them for later.
 
 ![triage](docs/screenshots/triage1.png)
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` or `↑` / `↓` | Navigate branches |
-| `d` | Toggle branch for deletion |
+| `d` | Toggle item for cleanup |
 | `s` | Toggle save/unsave |
-| `a` | Mark all deletable branches for deletion |
-| `u` | Clear all delete marks |
+| `a` | Mark all eligible items for cleanup |
+| `u` | Clear all cleanup marks |
 | `Enter` | Proceed to review screen |
 | `q` / `Esc` | Quit |
 
@@ -112,31 +115,34 @@ Saved branches are listed separately at the top of each group so you can see wha
 > - the current branch
 > - worktree checkouts
 
+Linked worktrees use the same preview and review flow. Their checked-out branch and latest commit appear alongside the path. The current linked worktree and any dirty or locked worktrees are shown with protection labels and cannot be selected. Cleanup runs `git worktree remove` without `--force`, and leaves the checked-out branch intact.
+
 **Review:** Before anything is deleted, the review screen shows the exact git commands that will run.
 
 - For `gone` and `unpushed` branches, this is just `git branch -D`.
 - For remote-tracked groups (`nopr`, `closed`, `merged`), the remote branch is deleted first (`git push <remote> :refs/heads/<branch>`) followed by the local branch.
+- For linked worktrees, this is `git worktree remove <path>`.
 
 ![review](docs/screenshots/review-remote.png)
 
 | Key | Action |
 |-----|--------|
-| `y` | Confirm and delete |
+| `y` | Confirm cleanup |
 | `n` | Go back to triage |
 | `q` / `Esc` | Quit |
 
-## Saved branches
+## Saved items
 
-Press `s` in the triage screen to save a branch. Saved branches are:
+Press `s` in the triage screen to save a branch or worktree. Saved items are:
 
-- Excluded from `a` (mark all) and delete-all until you explicitly unsave them
+- Excluded from `a` (mark all) and cleanup-all until you explicitly unsave them
 - Visible in both preview and TUI output, listed at the top of their group
 - Scoped to the cleanup group — saving a branch in `nopr` doesn't affect other groups
 
 
 > Details:
 > - Persisted per-repo at `.git/git-broom/keep-labels.json` (survives across sessions)
-> - In worktree setups, saved branches resolve through the shared git common dir so all worktrees share the same saved state.
+> - Saved items resolve through the shared git common dir so all worktrees share the same saved state.
 
 ## Contributing
 

@@ -1,9 +1,9 @@
 [package]
 name = "git-broom"
-version = "0.1.1"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.85"
-description = "Interactive TUI for cleaning up stale local git branches"
+description = "Interactive TUI for cleaning up stale local Git branches and worktrees"
 repository = "https://github.com/andrewlook/git-broom"
 homepage = "https://github.com/andrewlook/git-broom"
 license = "MIT"

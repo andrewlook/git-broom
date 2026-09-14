@@ -172,7 +172,7 @@ fn render_execution(
 }
 
 fn render_review_summary(app: &App, count: usize) -> Line<'static> {
-    let noun = if count == 1 { "branch" } else { "branches" };
+    let noun = app.mode.item_noun(count);
     Line::from(vec![
         Span::raw("About to run cleanup commands for "),
         Span::styled(
@@ -252,13 +252,13 @@ fn render_footer_left(app: &App) -> Line<'static> {
             key_hint("j / k"),
             desc_hint(" (up / down)  "),
             key_hint("d"),
-            desc_hint(" (delete)  "),
+            desc_hint(" (clean up)  "),
             key_hint("s"),
             desc_hint(" (save)  "),
             key_hint("a"),
-            desc_hint(" (delete all)  "),
+            desc_hint(" (clean up all)  "),
             key_hint("u"),
-            desc_hint(" (clear deletions)  "),
+            desc_hint(" (clear cleanup marks)  "),
             key_hint("q"),
             desc_hint(" (quit)"),
         ]),
@@ -279,7 +279,7 @@ fn render_footer_left(app: &App) -> Line<'static> {
 
 fn render_footer_right(app: &App) -> Line<'static> {
     match &app.screen {
-        AppScreen::Triage => Line::from(vec![key_hint("enter"), desc_hint(" (review deletions)")]),
+        AppScreen::Triage => Line::from(vec![key_hint("enter"), desc_hint(" (review cleanup)")]),
         AppScreen::Review(review) if review.require_explicit_choice => {
             Line::from(vec![Span::styled(
                 "y or n required",
@@ -436,7 +436,9 @@ fn render_branch(
 }
 
 fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
-    if mode.uses_pr_metadata() {
+    if mode == CleanupMode::Worktree {
+        branch.subject.clone()
+    } else if mode.uses_pr_metadata() {
         branch
             .pr_url
             .clone()

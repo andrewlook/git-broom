@@ -12,21 +12,23 @@ use crate::pr_cache::{CachedPullRequestRecord, PrCache, PrCacheRemoteEntry};
 const FIELD_SEPARATOR: char = '\u{1f}';
 const PR_CACHE_TTL_SECONDS: i64 = 10 * 60;
 
-pub const DEFAULT_PREVIEW_GROUPS: [CleanupMode; 6] = [
+pub const DEFAULT_PREVIEW_GROUPS: [CleanupMode; 7] = [
     CleanupMode::Gone,
     CleanupMode::Unpushed,
     CleanupMode::Pr,
     CleanupMode::NoPr,
     CleanupMode::Closed,
     CleanupMode::Merged,
+    CleanupMode::Worktree,
 ];
 
-pub const DEFAULT_CLEAN_GROUPS: [CleanupMode; 5] = [
+pub const DEFAULT_CLEAN_GROUPS: [CleanupMode; 6] = [
     CleanupMode::Gone,
     CleanupMode::Unpushed,
     CleanupMode::NoPr,
     CleanupMode::Closed,
     CleanupMode::Merged,
+    CleanupMode::Worktree,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,7 @@ pub enum CleanupMode {
     NoPr,
     Closed,
     Merged,
+    Worktree,
 }
 
 impl CleanupMode {
@@ -93,6 +96,7 @@ impl CleanupMode {
             "nopr" => Some(Self::NoPr),
             "closed" => Some(Self::Closed),
             "merged" => Some(Self::Merged),
+            "worktree" | "worktrees" => Some(Self::Worktree),
             _ => None,
         }
     }
@@ -105,6 +109,7 @@ impl CleanupMode {
             Self::NoPr => "nopr",
             Self::Closed => "closed",
             Self::Merged => "merged",
+            Self::Worktree => "worktree",
         }
     }
 
@@ -116,6 +121,7 @@ impl CleanupMode {
             Self::NoPr => "No PR",
             Self::Closed => "closed",
             Self::Merged => "merged",
+            Self::Worktree => "worktrees",
         }
     }
 
@@ -127,6 +133,7 @@ impl CleanupMode {
             Self::NoPr => "no pull request found on GitHub",
             Self::Closed => "pull request closed on GitHub",
             Self::Merged => "pull request merged but remote branch still exists",
+            Self::Worktree => "linked working directories attached to this repository",
         }
     }
 
@@ -138,6 +145,7 @@ impl CleanupMode {
             Self::NoPr => "No branches without PRs found.",
             Self::Closed => "No closed branches found.",
             Self::Merged => "No merged branches found.",
+            Self::Worktree => "No linked worktrees found.",
         }
     }
 
@@ -153,7 +161,16 @@ impl CleanupMode {
         match self {
             Self::Gone => branch.upstream_track.contains("[gone]"),
             Self::Unpushed => branch.upstream.is_none(),
-            Self::Pr | Self::NoPr | Self::Closed | Self::Merged => false,
+            Self::Pr | Self::NoPr | Self::Closed | Self::Merged | Self::Worktree => false,
+        }
+    }
+
+    pub fn item_noun(self, count: usize) -> &'static str {
+        match (self, count) {
+            (Self::Worktree, 1) => "worktree",
+            (Self::Worktree, _) => "worktrees",
+            (_, 1) => "branch",
+            _ => "branches",
         }
     }
 }
@@ -178,6 +195,9 @@ pub enum Protection {
     Main,
     Master,
     DefaultBranch,
+    CurrentWorktree,
+    DirtyWorktree,
+    LockedWorktree,
 }
 
 impl Protection {
@@ -188,6 +208,9 @@ impl Protection {
             Self::Main => "main",
             Self::Master => "master",
             Self::DefaultBranch => "default branch",
+            Self::CurrentWorktree => "current worktree",
+            Self::DirtyWorktree => "dirty worktree",
+            Self::LockedWorktree => "locked worktree",
         }
     }
 
@@ -198,6 +221,9 @@ impl Protection {
             Self::Main => "main",
             Self::Master => "master",
             Self::DefaultBranch => "default",
+            Self::CurrentWorktree => "current",
+            Self::DirtyWorktree => "dirty",
+            Self::LockedWorktree => "locked",
         }
     }
 
@@ -210,6 +236,11 @@ impl Protection {
             Self::Main => "The main branch is ineligible for cleanup.",
             Self::Master => "The master branch is ineligible for cleanup.",
             Self::DefaultBranch => "The default branch is ineligible for cleanup.",
+            Self::CurrentWorktree => "The worktree running git-broom is ineligible for cleanup.",
+            Self::DirtyWorktree => {
+                "This worktree has uncommitted changes and is ineligible for cleanup."
+            }
+            Self::LockedWorktree => "This worktree is locked and is ineligible for cleanup.",
         }
     }
 }
@@ -224,6 +255,7 @@ pub struct Branch {
     pub subject: String,
     pub pr_url: Option<String>,
     pub detail: Option<String>,
+    pub worktree_path: Option<String>,
     pub saved: bool,
     pub protections: Vec<Protection>,
     pub decision: Decision,
@@ -431,9 +463,13 @@ impl App {
 
         if let Some(protection) = branch.protections.first().copied() {
             self.modal = Some(Modal {
-                title: "Branch Ineligible",
+                title: if self.mode == CleanupMode::Worktree {
+                    "Worktree Ineligible"
+                } else {
+                    "Branch Ineligible"
+                },
                 message: format!(
-                    "{} Press Enter to return to branch triage.",
+                    "{} Press Enter to return to triage.",
                     protection.ineligible_message()
                 ),
             });
@@ -441,9 +477,13 @@ impl App {
         }
         if branch.saved {
             self.modal = Some(Modal {
-                title: "Branch Saved",
+                title: if self.mode == CleanupMode::Worktree {
+                    "Worktree Saved"
+                } else {
+                    "Branch Saved"
+                },
                 message: String::from(
-                    "Saved branches must be unsaved before deletion. Press s to remove the saved label, then press Enter to return to branch triage.",
+                    "Saved items must be unsaved before cleanup. Press s to remove the saved label, then press Enter to return to triage.",
                 ),
             });
             return;
@@ -703,7 +743,11 @@ impl App {
 
 impl CommandPlanItem {
     pub fn new(mode: CleanupMode, remote: &str, branch: &Branch) -> Self {
-        let local_command = format!("git branch -D {}", shell_quote(&branch.name));
+        let local_command = if mode == CleanupMode::Worktree {
+            format!("git worktree remove {}", shell_quote(&branch.name))
+        } else {
+            format!("git branch -D {}", shell_quote(&branch.name))
+        };
         let remote_command = if mode.uses_pr_metadata() && mode.is_cleanable() {
             branch.upstream_branch_name().map(|remote_branch| {
                 format!(
@@ -784,6 +828,14 @@ struct ClosedModeData {
 struct ClosedModeResolution {
     data: Option<ClosedModeData>,
     notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorktreeRecord {
+    path: String,
+    head: String,
+    branch: Option<String>,
+    locked: bool,
 }
 
 const GH_HEAD_SEARCH_CHUNK_SIZE: usize = 20;
@@ -870,7 +922,13 @@ where
     let current_branch = current_branch(repo)?;
 
     progress(ScanProgress::ReadingWorktrees, None);
-    let worktree_branches = other_worktree_branches(repo, current_branch.as_deref())?;
+    let worktrees = worktree_records(repo)?;
+    let worktree_branches = other_worktree_branches(&worktrees, current_branch.as_deref());
+    let worktree_items = if options.modes.contains(&CleanupMode::Worktree) {
+        load_worktree_inventory(repo, &worktrees)?
+    } else {
+        Vec::new()
+    };
 
     let force_refresh = options.refresh || options.intent == ScanIntent::Clean;
     if force_refresh && modes_need_pr_metadata(options.modes) {
@@ -904,6 +962,12 @@ where
     let mut pr_groups_added = false;
     for mode in options.modes.iter().copied() {
         match mode {
+            CleanupMode::Worktree => {
+                groups.push(CleanupGroup::from_mode(
+                    mode,
+                    apply_keep_labels(mode, worktree_items.clone(), &keep_store),
+                ));
+            }
             mode if mode.uses_pr_metadata() => {
                 if pr_groups_added {
                     continue;
@@ -977,7 +1041,9 @@ pub fn delete_branch(
     remote: &str,
     branch: &Branch,
 ) -> DeleteResult {
-    if mode.uses_pr_metadata() && mode.is_cleanable() {
+    if mode == CleanupMode::Worktree {
+        delete_worktree(repo, branch)
+    } else if mode.uses_pr_metadata() && mode.is_cleanable() {
         delete_closed_branch(repo, remote, branch)
     } else {
         delete_local_branch(repo, branch)
@@ -1145,7 +1211,7 @@ where
             CleanupMode::NoPr => no_pr.clone(),
             CleanupMode::Closed => closed.clone(),
             CleanupMode::Merged => merged.clone(),
-            CleanupMode::Gone | CleanupMode::Unpushed => continue,
+            CleanupMode::Gone | CleanupMode::Unpushed | CleanupMode::Worktree => continue,
         };
         groups.push(CleanupGroup::from_mode(mode, branches));
     }
@@ -1459,6 +1525,42 @@ fn delete_local_branch(repo: &Path, branch: &Branch) -> DeleteResult {
     }
 }
 
+fn delete_worktree(repo: &Path, branch: &Branch) -> DeleteResult {
+    let Some(path) = branch.worktree_path.as_deref() else {
+        return DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: String::from("worktree item is missing its path"),
+            output: String::from("worktree item is missing its path"),
+        };
+    };
+
+    match Command::new("git")
+        .args(["worktree", "remove", path])
+        .current_dir(repo)
+        .output()
+    {
+        Ok(output) if output.status.success() => DeleteResult {
+            branch: branch.name.clone(),
+            success: true,
+            message: command_message(&output),
+            output: command_message(&output),
+        },
+        Ok(output) => DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: format!("git worktree remove {path} failed"),
+            output: command_message(&output),
+        },
+        Err(error) => DeleteResult {
+            branch: branch.name.clone(),
+            success: false,
+            message: error.to_string(),
+            output: error.to_string(),
+        },
+    }
+}
+
 fn command_message(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1515,6 +1617,7 @@ fn parse_branch_line(
         subject,
         pr_url: None,
         detail: None,
+        worktree_path: None,
         saved: false,
         protections,
         decision: Decision::Undecided,
@@ -1605,12 +1708,42 @@ fn current_branch(repo: &Path) -> Result<Option<String>> {
     ))
 }
 
-fn other_worktree_branches(repo: &Path, current_branch: Option<&str>) -> Result<HashSet<String>> {
+fn worktree_records(repo: &Path) -> Result<Vec<WorktreeRecord>> {
     let output = git_output(repo, &["worktree", "list", "--porcelain"])?;
+    let mut records = Vec::new();
+    let mut record = WorktreeRecord::default();
+
+    for line in output.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if !record.path.is_empty() {
+                records.push(record);
+                record = WorktreeRecord::default();
+            }
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("worktree ") {
+            record.path = path.to_string();
+        } else if let Some(head) = line.strip_prefix("HEAD ") {
+            record.head = head.to_string();
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            record.branch = Some(branch.to_string());
+        } else if line == "locked" || line.starts_with("locked ") {
+            record.locked = true;
+        }
+    }
+
+    Ok(records)
+}
+
+fn other_worktree_branches(
+    worktrees: &[WorktreeRecord],
+    current_branch: Option<&str>,
+) -> HashSet<String> {
     let mut branches = HashSet::new();
 
-    for line in output.lines() {
-        let Some(branch) = line.strip_prefix("branch refs/heads/") else {
+    for worktree in worktrees {
+        let Some(branch) = worktree.branch.as_deref() else {
             continue;
         };
 
@@ -1619,7 +1752,87 @@ fn other_worktree_branches(repo: &Path, current_branch: Option<&str>) -> Result<
         }
     }
 
-    Ok(branches)
+    branches
+}
+
+fn load_worktree_inventory(repo: &Path, worktrees: &[WorktreeRecord]) -> Result<Vec<Branch>> {
+    let current_path = git_output(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+    )?
+    .trim()
+    .to_string();
+    let mut items = Vec::new();
+
+    // Git always lists the main worktree first. It cannot be removed with
+    // `git worktree remove`, so this group contains linked worktrees only.
+    for worktree in worktrees.iter().skip(1) {
+        let metadata = git_output(repo, &["show", "-s", "--format=%ct%x1f%s", &worktree.head])?;
+        let (timestamp, subject) = metadata
+            .trim()
+            .split_once(FIELD_SEPARATOR)
+            .unwrap_or(("0", ""));
+        let committed_at = timestamp.parse::<i64>().unwrap_or(0);
+        let mut protections = Vec::new();
+
+        if worktree.path == current_path {
+            protections.push(Protection::CurrentWorktree);
+        }
+        if worktree.locked {
+            protections.push(Protection::LockedWorktree);
+        }
+        if worktree_is_dirty(&worktree.path)? {
+            protections.push(Protection::DirtyWorktree);
+        }
+
+        let checkout = worktree
+            .branch
+            .as_deref()
+            .map(|branch| format!("branch {branch}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "detached at {}",
+                    &worktree.head[..worktree.head.len().min(12)]
+                )
+            });
+
+        items.push(Branch {
+            name: worktree.path.clone(),
+            upstream: None,
+            upstream_track: String::new(),
+            committed_at,
+            relative_date: format_relative_age(committed_at),
+            subject: checkout,
+            pr_url: None,
+            detail: (!subject.is_empty()).then(|| subject.to_string()),
+            worktree_path: Some(worktree.path.clone()),
+            saved: false,
+            protections,
+            decision: Decision::Undecided,
+        });
+    }
+
+    reorder_branches(&mut items);
+    Ok(items)
+}
+
+fn worktree_is_dirty(path: &str) -> Result<bool> {
+    if !Path::new(path).exists() {
+        return Ok(false);
+    }
+
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .with_context(|| format!("failed to inspect linked worktree {path}"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to inspect linked worktree {path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 fn ensure_remote_exists(repo: &Path, remote: &str) -> Result<()> {
@@ -1904,7 +2117,7 @@ mod tests {
 
         let modal = app.modal.expect("modal shown");
         assert_eq!(modal.title, "Branch Saved");
-        assert!(modal.message.contains("must be unsaved before deletion"));
+        assert!(modal.message.contains("must be unsaved before cleanup"));
         assert_eq!(app.branches[0].decision, Decision::Undecided);
     }
 
@@ -2053,6 +2266,38 @@ mod tests {
     }
 
     #[test]
+    fn begin_execution_builds_command_plan_for_worktree() {
+        let mut worktree = parse_branch_line(
+            &format!(
+                "feature/foo{FIELD_SEPARATOR}{FIELD_SEPARATOR}{FIELD_SEPARATOR}{SAMPLE_TIMESTAMP}{FIELD_SEPARATOR}test subject"
+            ),
+            None,
+            None,
+            &HashSet::new(),
+        )
+        .expect("branch parsed");
+        worktree.name = String::from("/tmp/a linked worktree");
+        worktree.worktree_path = Some(worktree.name.clone());
+        worktree.decision = Decision::Delete;
+
+        let mut app = App::from_group(
+            CleanupGroup::from_mode(CleanupMode::Worktree, vec![worktree]),
+            "origin",
+            1,
+            1,
+        );
+
+        assert!(app.enter_review());
+        app.begin_execution();
+
+        let items = app.execution_items().expect("execution items available");
+        assert_eq!(
+            items[0].plain_command(),
+            "git worktree remove '/tmp/a linked worktree'"
+        );
+    }
+
+    #[test]
     fn set_execution_failure_records_output_and_stops_progression() {
         let mut branch = parse_branch_line(
             &format!(
@@ -2139,6 +2384,7 @@ mod tests {
                 subject: String::from("first"),
                 pr_url: None,
                 detail: None,
+                worktree_path: None,
                 saved: false,
                 protections: Vec::new(),
                 decision: Decision::Undecided,
@@ -2152,6 +2398,7 @@ mod tests {
                 subject: String::from("second"),
                 pr_url: None,
                 detail: None,
+                worktree_path: None,
                 saved: false,
                 protections: Vec::new(),
                 decision: Decision::Undecided,
@@ -2165,6 +2412,7 @@ mod tests {
                 subject: String::from("main"),
                 pr_url: None,
                 detail: None,
+                worktree_path: None,
                 saved: false,
                 protections: vec![Protection::Main],
                 decision: Decision::Undecided,
@@ -2178,6 +2426,7 @@ mod tests {
                 subject: String::from("gone"),
                 pr_url: None,
                 detail: None,
+                worktree_path: None,
                 saved: false,
                 protections: Vec::new(),
                 decision: Decision::Undecided,

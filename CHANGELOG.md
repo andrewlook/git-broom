@@ -2,6 +2,13 @@
 
 All notable changes to `git-broom` should be documented in this file.
 
+## [0.2.4] - 2026-09-12
+
+### Added
+
+- A `worktree` cleanup group that previews linked worktrees and removes selected clean worktrees with `git worktree remove`.
+- Protection labels for the current, dirty, and locked linked worktrees so they remain visible without becoming cleanup candidates.
+
 ## [0.1.1] - 2026-04-13
 
 ### Added

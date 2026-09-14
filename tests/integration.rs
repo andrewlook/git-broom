@@ -70,6 +70,141 @@ fn scan_marks_other_worktree_branch_as_protected() {
 }
 
 #[test]
+fn scan_lists_clean_linked_worktree_as_deletable() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/worktree-cleanup");
+    let worktree_path = repo.temp_path("linked-worktree");
+    repo.git_local([
+        "worktree",
+        "add",
+        worktree_path.to_str().expect("utf8 path"),
+        "feature/worktree-cleanup",
+    ]);
+    let worktree_name = fs::canonicalize(&worktree_path)
+        .expect("worktree path canonicalized")
+        .to_string_lossy()
+        .into_owned();
+
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Worktree], "origin")
+        .expect("scan succeeds");
+    let worktree = find_branch(&groups, CleanupMode::Worktree, &worktree_name);
+
+    assert!(worktree.is_deletable());
+    assert_eq!(
+        worktree.worktree_path.as_deref(),
+        Some(worktree_name.as_str())
+    );
+    assert_eq!(worktree.subject, "branch feature/worktree-cleanup");
+}
+
+#[test]
+fn worktree_preview_shows_path_and_checked_out_branch() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/worktree-preview");
+    let worktree_path = repo.temp_path("preview-worktree");
+    repo.git_local([
+        "worktree",
+        "add",
+        worktree_path.to_str().expect("utf8 path"),
+        "feature/worktree-preview",
+    ]);
+    let worktree_name = fs::canonicalize(&worktree_path)
+        .expect("worktree path canonicalized")
+        .to_string_lossy()
+        .into_owned();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_git-broom"))
+        .args(["--groups", "worktree"])
+        .current_dir(repo.local_path())
+        .output()
+        .expect("git-broom runs");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("worktrees"));
+    assert!(stdout.contains(&worktree_name.chars().take(12).collect::<String>()));
+    assert!(stdout.contains("branch feature/worktree-preview"));
+}
+
+#[test]
+fn scan_marks_dirty_linked_worktree_as_protected() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/dirty-worktree");
+    let worktree_path = repo.temp_path("dirty-worktree");
+    repo.git_local([
+        "worktree",
+        "add",
+        worktree_path.to_str().expect("utf8 path"),
+        "feature/dirty-worktree",
+    ]);
+    let worktree_name = fs::canonicalize(&worktree_path)
+        .expect("worktree path canonicalized")
+        .to_string_lossy()
+        .into_owned();
+    fs::write(worktree_path.join("README.md"), "do not remove\n").expect("dirty file written");
+
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Worktree], "origin")
+        .expect("scan succeeds");
+    let worktree = find_branch(&groups, CleanupMode::Worktree, &worktree_name);
+
+    assert_eq!(worktree.protections, vec![Protection::DirtyWorktree]);
+    assert!(!worktree.is_deletable());
+}
+
+#[test]
+fn scan_marks_locked_linked_worktree_as_protected() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/locked-worktree");
+    let worktree_path = repo.temp_path("locked-worktree");
+    repo.git_local([
+        "worktree",
+        "add",
+        worktree_path.to_str().expect("utf8 path"),
+        "feature/locked-worktree",
+    ]);
+    repo.git_local([
+        "worktree",
+        "lock",
+        worktree_path.to_str().expect("utf8 path"),
+    ]);
+    let worktree_name = fs::canonicalize(&worktree_path)
+        .expect("worktree path canonicalized")
+        .to_string_lossy()
+        .into_owned();
+
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Worktree], "origin")
+        .expect("scan succeeds");
+    let worktree = find_branch(&groups, CleanupMode::Worktree, &worktree_name);
+
+    assert_eq!(worktree.protections, vec![Protection::LockedWorktree]);
+    assert!(!worktree.is_deletable());
+}
+
+#[test]
+fn scan_marks_invoking_linked_worktree_as_protected() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/current-worktree");
+    let worktree_path = repo.temp_path("current-worktree");
+    repo.git_local([
+        "worktree",
+        "add",
+        worktree_path.to_str().expect("utf8 path"),
+        "feature/current-worktree",
+    ]);
+    let worktree_name = fs::canonicalize(&worktree_path)
+        .expect("worktree path canonicalized")
+        .to_string_lossy()
+        .into_owned();
+
+    let groups = scan_selected_modes(&worktree_path, &[CleanupMode::Worktree], "origin")
+        .expect("scan succeeds");
+    let worktree = find_branch(&groups, CleanupMode::Worktree, &worktree_name);
+
+    assert_eq!(worktree.protections, vec![Protection::CurrentWorktree]);
+    assert!(!worktree.is_deletable());
+}
+
+#[test]
 fn scan_works_from_detached_head() {
     let repo = TestRepo::new();
     repo.create_gone_branch("feature/detached");
@@ -620,6 +755,38 @@ fn delete_closed_branch_keeps_local_branch_when_remote_delete_fails() {
     assert!(repo.local_branch_exists("feature/closed"));
 }
 
+#[test]
+fn delete_worktree_removes_directory_and_keeps_branch() {
+    let repo = TestRepo::new();
+    repo.create_unpushed_branch("feature/remove-worktree");
+    let worktree_path = repo.temp_path("remove-worktree");
+    repo.git_local([
+        "worktree",
+        "add",
+        worktree_path.to_str().expect("utf8 path"),
+        "feature/remove-worktree",
+    ]);
+    let worktree_name = fs::canonicalize(&worktree_path)
+        .expect("worktree path canonicalized")
+        .to_string_lossy()
+        .into_owned();
+
+    let groups = scan_selected_modes(repo.local_path(), &[CleanupMode::Worktree], "origin")
+        .expect("scan succeeds");
+    let worktree = find_branch(&groups, CleanupMode::Worktree, &worktree_name);
+    let results = delete_branches(
+        repo.local_path(),
+        CleanupMode::Worktree,
+        "origin",
+        &[worktree],
+    );
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].success, "{}", results[0].message);
+    assert!(!worktree_path.exists());
+    assert!(repo.local_branch_exists("feature/remove-worktree"));
+}
+
 struct TestRepo {
     _root: TempDir,
     _remote: TempDir,
@@ -900,6 +1067,7 @@ fn tracked_branch(name: &str, remote: &str) -> Branch {
         subject: String::from("subject"),
         pr_url: None,
         detail: None,
+        worktree_path: None,
         saved: false,
         protections: Vec::new(),
         decision: Decision::Delete,

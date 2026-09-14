@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "git-broom"
-version = "0.1.1"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "crossterm 0.29.0",

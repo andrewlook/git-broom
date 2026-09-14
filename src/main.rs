@@ -179,7 +179,7 @@ fn parse_groups_value(value: &str) -> Result<Vec<CleanupMode>> {
 
 fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Result<()> {
     if groups.iter().all(|group| group.branches.is_empty()) {
-        println!("No branches found for selected cleanup groups.");
+        println!("No items found for selected cleanup groups.");
         return Ok(());
     }
 
@@ -204,7 +204,7 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
             }
             ExitAction::Skip => {
                 persist_saved_branches(repo, &app)?;
-                println!("No {} branches selected for deletion.", app.group_name);
+                println!("No {} selected for cleanup.", app.group_name);
             }
             ExitAction::Completed { deleted, failed } => {
                 persist_saved_branches(repo, &app)?;
@@ -212,7 +212,7 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
                 total_failed += failed;
                 if failed > 0 {
                     println!(
-                        "Workflow complete. Deleted {total_deleted} branches. {total_failed} failed."
+                        "Workflow complete. Cleaned up {total_deleted} items. {total_failed} failed."
                     );
                     return Ok(());
                 }
@@ -220,7 +220,7 @@ fn run_interactive(repo: &Path, remote: &str, groups: Vec<CleanupGroup>) -> Resu
         }
     }
 
-    println!("Workflow complete. Deleted {total_deleted} branches. {total_failed} failed.");
+    println!("Workflow complete. Cleaned up {total_deleted} items. {total_failed} failed.");
     Ok(())
 }
 
@@ -230,7 +230,7 @@ fn run_preview(outcome: &ScanOutcome) -> Result<()> {
             println!("{line}");
         }
     } else if outcome.notes.is_empty() {
-        println!("No branches found for selected cleanup groups.");
+        println!("No items found for selected cleanup groups.");
     }
 
     if !outcome.notes.is_empty() && !outcome.groups.is_empty() {
@@ -439,9 +439,7 @@ fn format_preview_lines(groups: &[CleanupGroup], available_width: usize) -> Vec<
     }
 
     if lines.is_empty() {
-        return vec![String::from(
-            "No branches found for selected cleanup groups.",
-        )];
+        return vec![String::from("No items found for selected cleanup groups.")];
     }
 
     lines
@@ -588,6 +586,7 @@ fn group_header_color(group_name: &str) -> crossterm::style::Color {
         "No PR" => crossterm::style::Color::DarkYellow,
         "closed" => crossterm::style::Color::Blue,
         "merged" => crossterm::style::Color::Green,
+        "worktrees" => crossterm::style::Color::Magenta,
         _ => crossterm::style::Color::White,
     }
 }
@@ -632,7 +631,9 @@ fn left_pad(value: &str, width: usize) -> String {
 }
 
 fn secondary_column_value(branch: &Branch, mode: CleanupMode) -> String {
-    if mode.uses_pr_metadata() {
+    if mode == CleanupMode::Worktree {
+        branch.subject.clone()
+    } else if mode.uses_pr_metadata() {
         branch
             .pr_url
             .clone()
@@ -715,11 +716,11 @@ fn current_unix_timestamp() -> i64 {
 }
 
 fn usage_text() -> &'static str {
-    r#"git-broom shows grouped local-branch inventory by default, then cleans branches only when you ask it to.
+    r#"git-broom shows grouped branch and worktree inventory by default, then cleans items only when you ask it to.
 
 Usage:
-  git-broom [-g <gone,unpushed,pr,nopr,closed,merged>] [--remote <name>] [-r]
-  git-broom clean [-g <gone,unpushed,nopr,closed,merged>] [--remote <name>]
+  git-broom [-g <gone,unpushed,pr,nopr,closed,merged,worktree>] [--remote <name>] [-r]
+  git-broom clean [-g <gone,unpushed,nopr,closed,merged,worktree>] [--remote <name>]
 
 Cleanup groups:
   gone       Upstream branch no longer exists on the remote.
@@ -728,6 +729,7 @@ Cleanup groups:
   nopr       Remote-tracked branch has no pull request on GitHub.
   closed     Remote-tracked branch has a closed pull request on GitHub.
   merged     Remote-tracked branch has a merged pull request whose branch still exists.
+  worktree   Linked working directory attached to this repository.
 
 How it works:
   - `git-broom` previews all selected groups without deleting anything.
@@ -737,8 +739,9 @@ How it works:
   - GitHub-backed groups reuse cached PR metadata when it is fresh.
     `git-broom clean` refreshes GitHub data before any destructive review.
   - Protected branches stay visible for context but cannot be deleted.
-  - Press s in the TUI to save or unsave a branch for this repo and mode.
-    Saved branches stay visible but are excluded from delete-all until unsaved.
+  - Current, dirty, and locked linked worktrees stay visible but cannot be removed.
+  - Press s in the TUI to save or unsave an item for this repo and group.
+    Saved items stay visible but are excluded from cleanup-all until unsaved.
 
 Options:
   -g, --groups     Comma-separated groups to show or clean. Default: all for each mode.
@@ -758,6 +761,9 @@ Examples:
 
   git-broom clean --groups gone,nopr
       Only clean gone and no-PR branches.
+
+  git-broom clean --groups worktree
+      Review and remove clean linked worktrees.
 
   git-broom --groups pr,closed,merged --remote upstream
       Preview GitHub-backed groups using the upstream remote.
@@ -887,6 +893,7 @@ mod tests {
             subject: "subject line".to_string(),
             pr_url: None,
             detail: None,
+            worktree_path: None,
             saved: false,
             decision: Decision::Undecided,
             protections: Vec::new(),
@@ -906,6 +913,7 @@ mod tests {
                 CleanupMode::NoPr,
                 CleanupMode::Closed,
                 CleanupMode::Merged,
+                CleanupMode::Worktree,
             ]
         );
         assert_eq!(cli.intent, CliIntent::Preview);
@@ -957,8 +965,8 @@ mod tests {
 
     #[test]
     fn parse_groups_value_accepts_comma_separated_groups() {
-        let groups =
-            parse_groups_value("gone, pr,nopr,closed,merged,unpushed").expect("groups parse");
+        let groups = parse_groups_value("gone, pr,nopr,closed,merged,unpushed,worktree")
+            .expect("groups parse");
 
         assert_eq!(
             groups,
@@ -968,7 +976,8 @@ mod tests {
                 CleanupMode::NoPr,
                 CleanupMode::Closed,
                 CleanupMode::Merged,
-                CleanupMode::Unpushed
+                CleanupMode::Unpushed,
+                CleanupMode::Worktree
             ]
         );
     }
