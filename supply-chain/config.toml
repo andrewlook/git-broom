@@ -73,7 +73,7 @@ version = "2.4.1"
 criteria = "safe-to-run"
 
 [[exemptions.git-broom]]
-version = "0.1.1"
+version = "0.2.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.hashbrown]]
